@@ -542,22 +542,31 @@ class GatewayClient {
     const url = normalizeGatewayUrl(this.opts.url);
     if (!url) { console.error("Invalid gateway URL"); return; }
 
+    addConnectionDebug(`opening websocket: ${url}`);
+
     this.lastSeq = null;
     this.ws = new WebSocket(url);
-    this.ws.addEventListener("open", () => this.queueConnect());
+    this.ws.addEventListener("open", () => {
+      addConnectionDebug("websocket open");
+      this.queueConnect();
+    });
     this.ws.addEventListener("message", (e) => this.handleMessage(e.data));
     this.ws.addEventListener("close", (e) => {
       this.ws = null;
       this.flushPending(new Error(`closed (${e.code})`));
+      addConnectionDebug(`websocket closed (${e.code}${e.reason ? `: ${e.reason}` : ""})`);
       this.opts.onClose?.({ code: e.code, reason: e.reason || "" });
       this.scheduleReconnect();
     });
-    this.ws.addEventListener("error", () => {});
+    this.ws.addEventListener("error", () => {
+      addConnectionDebug("websocket error");
+    });
   }
 
   scheduleReconnect() {
     if (this.closed) return;
     const delay = this.backoffMs;
+    addConnectionDebug(`reconnect in ${Math.round(delay)}ms`);
     this.backoffMs = Math.min(this.backoffMs * 1.7, 15000);
     setTimeout(() => this.doConnect(), delay);
   }
@@ -576,6 +585,7 @@ class GatewayClient {
     this.connectNonce = null;
     this.connectSent = false;
     if (this.connectTimer !== null) clearTimeout(this.connectTimer);
+    addConnectionDebug("queueing connect handshake");
     this.connectTimer = setTimeout(() => this.sendConnect(), 750);
   }
 
@@ -612,8 +622,15 @@ class GatewayClient {
     };
 
     this.request("connect", params)
-      .then((payload) => { this.backoffMs = 800; this.opts.onHello?.(payload); })
-      .catch(() => { this.ws?.close(4008, "connect failed"); });
+      .then((payload) => {
+        addConnectionDebug("connect handshake accepted");
+        this.backoffMs = 800;
+        this.opts.onHello?.(payload);
+      })
+      .catch((err) => {
+        addConnectionDebug(`connect handshake failed${err?.message ? `: ${err.message}` : ""}`);
+        this.ws?.close(4008, "connect failed");
+      });
   }
 
   handleMessage(data) {
@@ -655,6 +672,31 @@ class GatewayClient {
       this.opts.onEvent?.(msg);
     }
   }
+}
+
+function addConnectionDebug(message) {
+  const text = String(message || "").trim();
+  if (!text) return;
+  const stamp = new Date().toLocaleTimeString();
+  state.connectionDebug.push(`[${stamp}] ${text}`);
+  if (state.connectionDebug.length > state.connectionDebugMax) {
+    state.connectionDebug.splice(0, state.connectionDebug.length - state.connectionDebugMax);
+  }
+  renderReconnectDebugLog();
+}
+
+function renderReconnectDebugLog() {
+  const root = document.getElementById("reconnect-debug");
+  const pre = document.getElementById("reconnect-debug-log");
+  if (!root || !pre) return;
+
+  const shouldShow = state.reconnecting || state.gatewayRestarting || !state.gateway?.connected;
+  root.classList.toggle("oc-hidden", !shouldShow);
+  if (!shouldShow) return;
+
+  const lines = state.connectionDebug.slice(-40);
+  pre.textContent = lines.length ? lines.join("\n") : "waiting for connection events...";
+  pre.scrollTop = pre.scrollHeight;
 }
 
 // ─── Session Delete with Fallback ────────────────────────────────────
@@ -729,6 +771,8 @@ const state = {
   reconnectSince: 0,
   reconnectHintTimer: null,
   onboardingHintShown: false,
+  connectionDebug: [],
+  connectionDebugMax: 120,
   
   // TTS config from gateway
   ttsConfig: {},
@@ -1309,6 +1353,7 @@ async function connectToGateway() {
       deviceIdentity: state.deviceIdentity,
       onHello: (payload) => {
         console.log("Connected to gateway:", payload);
+        addConnectionDebug("connected: hello received");
         helloReceived = true;
         localStorage.setItem("deviceApproved", "true");
         state.snapshot = payload?.snapshot || {};
@@ -1321,6 +1366,7 @@ async function connectToGateway() {
       },
       onClose: (info) => {
         console.log("Gateway connection closed:", info);
+        addConnectionDebug(`gateway closed (${info?.code || "?"}${info?.reason ? `: ${info.reason}` : ""})`);
         updateConnectionStatus(false);
         if (!helloReceived && info.reason === "pairing required" && !pairingDetected) {
           pairingDetected = true;
@@ -1329,6 +1375,7 @@ async function connectToGateway() {
       },
       onGap: (info) => {
         console.warn("Gateway event gap detected:", info);
+        addConnectionDebug(`event gap detected (expected ${info?.expected ?? "?"}, got ${info?.received ?? "?"})`);
         void recoverFromEventGap(info);
       },
       onEvent: handleGatewayEvent,
@@ -1496,6 +1543,7 @@ function scheduleReconnectHint() {
 
 function updateConnectionStatus(connected) {
   if (connected) {
+    addConnectionDebug("connection state: online");
     clearReconnectHintTimer();
     state.reconnecting = false;
     state.gatewayRestarting = false;
@@ -1505,6 +1553,7 @@ function updateConnectionStatus(connected) {
     updateComposerPlaceholder();
     hideReconnectBanner();
   } else {
+    addConnectionDebug("connection state: offline");
     stopHistoryInFlightPoll();
     ui.sendBtn.classList.add("oc-hidden");
     ui.messageInput.disabled = true;
@@ -1583,6 +1632,7 @@ async function retryConnectionNow() {
   state.gateway = null;
 
   showReconnectBanner("Retrying connection…");
+  addConnectionDebug("manual action: retry");
   try {
     await startChat();
   } catch (err) {
@@ -1616,6 +1666,7 @@ async function rePairThisBrowser() {
   }
 
   showReconnectBanner("Re-pairing browser…");
+  addConnectionDebug("manual action: re-pair browser");
   try {
     await startChat();
   } catch (err) {
@@ -1629,6 +1680,7 @@ async function resetConnectionFromScratch() {
     "This clears saved gateway URL/token and local pairing keys on this browser. You’ll reconnect from scratch.",
   );
   if (!ok) return;
+  addConnectionDebug("manual action: start over (clear local connection)");
   clearLocalConnectionAndReturnToLanding({ showConnectModal: true });
 }
 
@@ -1645,6 +1697,10 @@ function showReconnectBanner(text) {
           <button class="oc-reconnect-action" data-reconnect-action="retry" title="Retry connection now">Retry</button>
           <button class="oc-reconnect-action" data-reconnect-action="repair" title="Keep URL/token and re-pair this browser">Re-pair browser</button>
           <button class="oc-reconnect-action" data-reconnect-action="reset" title="Clear local storage connection data and reconnect from scratch">Start over</button>
+        </div>
+        <div class="oc-reconnect-debug oc-hidden" id="reconnect-debug">
+          <div class="oc-reconnect-debug-title">Connection logs</div>
+          <pre class="oc-reconnect-debug-log" id="reconnect-debug-log"></pre>
         </div>
       </div>
     `;
@@ -1676,6 +1732,7 @@ function showReconnectBanner(text) {
 
   banner.title = "Click banner to open control panel";
   banner.style.display = "";
+  renderReconnectDebugLog();
 }
 
 function hideReconnectBanner() {
