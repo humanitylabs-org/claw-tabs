@@ -13,6 +13,21 @@ function str(v, fallback = "") {
   return typeof v === "string" ? v : fallback;
 }
 
+const APP_BASE_PATH = (() => {
+  const meta = document.querySelector('meta[name="oc-base-path"]')?.content || "/clawtabs";
+  const trimmed = String(meta).trim();
+  if (!trimmed || trimmed === "/") return "";
+  const cleaned = `/${trimmed.replace(/^\/+|\/+$/g, "")}`;
+  return cleaned === "/" ? "" : cleaned;
+})();
+
+function withBasePath(pathname = "") {
+  const path = String(pathname || "").trim();
+  if (!path) return APP_BASE_PATH || "/";
+  const normalized = path.startsWith("/") ? path : `/${path}`;
+  return `${APP_BASE_PATH}${normalized}`;
+}
+
 const TAB_NAMER_SUFFIX = ":tab-namer";
 const TAB_NAMER_MAX_CHARS = 30;
 const TAB_NAMER_MAX_WORDS = 5;
@@ -1126,7 +1141,7 @@ function totalUnread() {
 /** Update document.title with unread count */
 function updateDocumentTitle() {
   const n = totalUnread();
-  const base = "My Claw";
+  const base = "Claw Tabs";
   document.title = n > 0 ? `(${n}) ${base}` : base;
 }
 
@@ -1190,7 +1205,7 @@ function fireNotification(sessionKey, text) {
   try {
     const n = new Notification(title, {
       body,
-      icon: "/icon-192.png",
+      icon: withBasePath("/icon-192.png"),
       tag: `openclaw-${sessionKey}`, // replaces previous notification for same tab
       renotify: true,
     });
@@ -1326,7 +1341,7 @@ function showPairingBanner() {
           <span style="color:#888;font-size:0.82em;">Waiting for approval — will connect automatically...</span>
         </div>
         <p style="margin:0.55rem 0 0;color:#8f8f95;font-size:0.76em;line-height:1.35;">
-          If usemyclaw still cannot connect after approval, check gateway setup: <code style="background:#28282d;padding:0.1em 0.3em;border-radius:4px;font-size:0.85em;">gateway.controlUi.allowedOrigins</code> includes <code style="background:#28282d;padding:0.1em 0.3em;border-radius:4px;font-size:0.85em;">https://usemyclaw.com</code> and <code style="background:#28282d;padding:0.1em 0.3em;border-radius:4px;font-size:0.85em;">https://www.usemyclaw.com</code>, and <code style="background:#28282d;padding:0.1em 0.3em;border-radius:4px;font-size:0.85em;">tailscale serve status</code> is active.
+          If Claw Tabs still cannot connect after approval, check gateway setup: if the app runs on a different tailnet hostname, add that origin to <code style="background:#28282d;padding:0.1em 0.3em;border-radius:4px;font-size:0.85em;">gateway.controlUi.allowedOrigins</code>, and confirm <code style="background:#28282d;padding:0.1em 0.3em;border-radius:4px;font-size:0.85em;">tailscale serve status</code> is active.
         </p>
       </div>
     </div>
@@ -4689,7 +4704,7 @@ async function prefetchAllTabs() {
 
 // Strip OpenClaw gateway-injected metadata from user message text before
 // rendering. Mirrors `stripInboundMetadata` in OpenClaw's strip-inbound-meta
-// module so usemyclaw.com stays in parity with the official control UI.
+// module so Claw Tabs stays in parity with the official control UI.
 const INBOUND_META_SENTINELS = [
   "Conversation info (untrusted metadata):",
   "Sender (untrusted metadata):",
@@ -9391,7 +9406,7 @@ function buildExportMessagesHtml() {
 
 function resolveThemeHref() {
   const link = document.querySelector('link[rel="stylesheet"][href*="theme.css"]');
-  const href = link?.getAttribute("href") || "/theme.css";
+  const href = link?.getAttribute("href") || withBasePath("/theme.css");
   const abs = new URL(href, window.location.origin).toString();
   return abs;
 }

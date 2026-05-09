@@ -1,21 +1,23 @@
 {
-  "name": "Use My Claw",
-  "short_name": "My Claw",
-  "description": "A better interface for OpenClaw — chat, files, and agent config in one place.",
-  "start_url": "/",
+  "id": "/clawtabs/",
+  "name": "Claw Tabs",
+  "short_name": "ClawTabs",
+  "description": "Local-first interface for OpenClaw, hosted on your own tailnet URL.",
+  "start_url": "/clawtabs/",
+  "scope": "/clawtabs/",
   "display": "standalone",
   "background_color": "#0B0B0D",
   "theme_color": "#0B0B0D",
   "orientation": "portrait-primary",
   "icons": [
     {
-      "src": "/icon-192.png",
+      "src": "icon-192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any maskable"
     },
     {
-      "src": "/icon-512.png",
+      "src": "icon-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"

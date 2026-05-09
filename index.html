@@ -7,15 +7,16 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="theme-color" content="#0B0B0D">
-  <title>Use My Claw — A Better Interface for OpenClaw</title>
-  <meta name="description" content="A better interface for your OpenClaw bot. Chat in tabs, manage your gateway, and configure your agent. No terminal required.">
+  <title>Claw Tabs — Local-First Interface for OpenClaw</title>
+  <meta name="description" content="Local-first interface for your OpenClaw assistant. Chat in tabs, manage gateway settings, and run your AI from your tailnet URL.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
-  <link rel="manifest" href="/manifest.json">
-  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
-  <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
-  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <meta name="oc-base-path" content="/clawtabs">
+  <link rel="manifest" href="/clawtabs/manifest.json">
+  <link rel="icon" type="image/png" sizes="32x32" href="/clawtabs/favicon-32.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/clawtabs/icon-192.png">
+  <link rel="apple-touch-icon" href="/clawtabs/apple-touch-icon.png">
   <style>
     * {
       box-sizing: border-box;
@@ -1511,7 +1512,7 @@
     [data-theme="light"] .openclaw-input-wrapper { background: var(--background-secondary); border-color: var(--background-modifier-border); }
     [data-theme="light"] #message-input { color: var(--text-normal); }
   </style>
-  <link rel="stylesheet" href="/theme.css?v=169">
+  <link rel="stylesheet" href="/clawtabs/theme.css?v=1">
   <!-- Cal redesign: final spacing fix (inline = highest cascade priority) -->
   <style id="cal-spacing-fix">
     /* Every section toggle — tight spacing, no exceptions */
@@ -1561,8 +1562,8 @@
     <div class="landing-inner">
       <nav class="landing-nav">
         <div class="landing-nav-brand">
-          <img src="/logo-64.png" width="28" height="28" alt="Use My Claw" style="border-radius:6px;">
-          <span>Use My Claw</span>
+          <img src="/clawtabs/logo-64.png" width="28" height="28" alt="Claw Tabs" style="border-radius:6px;">
+          <span>Claw Tabs</span>
         </div>
         <a href="https://openclaw.ai" target="_blank" rel="noopener" class="landing-nav-link">What's OpenClaw?</a>
       </nav>
@@ -1570,7 +1571,7 @@
       <main class="landing-hero">
         <h1>OpenClaw does everything.<br><span class="landing-dim">Telegram shows you nothing.</span></h1>
         <p class="landing-subtitle">
-          Your OpenClaw bot is a personal AI that's on 24/7. It remembers everything, handles tasks on its own, and keeps working while you sleep. But in Telegram, all you see is messages. This app shows you the full picture.
+          Your OpenClaw bot is a personal AI that's on 24/7. It remembers everything, handles tasks on its own, and keeps working while you sleep. But in Telegram, all you see is messages. Claw Tabs shows you the full picture.
         </p>
         <div class="landing-cta-row">
           <button class="landing-cta-primary" id="landing-connect-btn" onclick="document.getElementById('connect-modal-overlay').classList.add('open');setTimeout(function(){document.getElementById('connect-modal-url').focus()},150)">Connect to your OpenClaw <span class="cta-arrow">→</span></button>
@@ -1585,7 +1586,7 @@
             <p>One chat thread. You send a message, you get a reply. You can't see your bot's files, memory, or settings. If it's working on something, you just wait.</p>
           </div>
           <div class="landing-compare-item">
-            <div class="landing-compare-label landing-compare-new">This app</div>
+            <div class="landing-compare-label landing-compare-new">Claw Tabs</div>
             <p>Chat in multiple tabs. Browse every file your OpenClaw bot has access to. Edit its personality, memory, and preferences. See what it's doing, not just what it says.</p>
           </div>
         </div>
@@ -1598,7 +1599,7 @@
             <span class="landing-preview-dot"></span>
             <span class="landing-preview-dot"></span>
             <span class="landing-preview-dot"></span>
-            <span class="landing-preview-url">usemyclaw.com</span>
+            <span class="landing-preview-url">&lt;your-device&gt;.ts.net/clawtabs</span>
           </div>
           <div class="landing-preview-body">
             <div class="landing-preview-sidebar">
@@ -1663,7 +1664,7 @@
       <footer class="landing-footer">
         <a class="landing-footer-brand" href="https://humanitylabs.org" target="_blank" rel="noopener">
           <span>powered by</span>
-          <img src="/humanity-labs-logo.png" alt="Humanity Labs" height="14">
+          <img src="/clawtabs/humanity-labs-logo.png" alt="Humanity Labs" height="14">
         </a>
       </footer>
     </div>
@@ -1958,7 +1959,7 @@
           <button class="hud-connect-btn" id="dash-connect-btn">CONNECT</button>
           <p class="hud-connect-hint">
             Stored locally on this device only.<br>
-            On your gateway: allow origins <code style="font-size:10px">https://usemyclaw.com</code> + <code style="font-size:10px">https://www.usemyclaw.com</code>, keep <code style="font-size:10px">gateway.tailscale.mode=serve</code>, and verify <code style="font-size:10px">tailscale serve status</code> is active.
+            On your gateway: if this app is on a different tailnet hostname, add that origin to <code style="font-size:10px">gateway.controlUi.allowedOrigins</code>. Keep <code style="font-size:10px">gateway.tailscale.mode=serve</code> and verify <code style="font-size:10px">tailscale serve status</code>.
           </p>
         </div>
 
@@ -2077,7 +2078,7 @@
 
   </div>
 
-  <script src="/app.js?v=201"></script>
+  <script src="/clawtabs/app.js?v=1"></script>
   <!-- Connect Modal (styles inlined to avoid cache issues) -->
   <style>
     #connect-modal-overlay{display:none;position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.7);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);justify-content:center;align-items:center;padding:24px}
@@ -2103,7 +2104,7 @@
     <div class="connect-modal">
       <button class="connect-modal-close" onclick="document.getElementById('connect-modal-overlay').classList.remove('open')">&times;</button>
       <div class="connect-modal-header">
-        <img src="/logo-64.png" width="36" height="36" alt="" style="border-radius:8px;">
+        <img src="/clawtabs/logo-64.png" width="36" height="36" alt="" style="border-radius:8px;">
         <h2>Connect to your OpenClaw</h2>
       </div>
       <div class="connect-modal-body">
@@ -2118,7 +2119,7 @@
         <button class="connect-modal-btn" id="connect-modal-btn">Connect</button>
         <p class="connect-modal-hint">
           Stored locally on this device only.<br>
-          Gateway checklist: add <code style="font-size:10px">https://usemyclaw.com</code> + <code style="font-size:10px">https://www.usemyclaw.com</code> to <code style="font-size:10px">gateway.controlUi.allowedOrigins</code>, set <code style="font-size:10px">gateway.tailscale.mode=serve</code>, and confirm <code style="font-size:10px">tailscale serve status</code>.<br>
+          Gateway checklist: if Claw Tabs and your gateway use different tailnet hostnames, add this app origin to <code style="font-size:10px">gateway.controlUi.allowedOrigins</code>. Keep <code style="font-size:10px">gateway.tailscale.mode=serve</code> and confirm <code style="font-size:10px">tailscale serve status</code>.<br>
           For Browser + Terminal panels, use your <code style="font-size:10px">*.ts.net</code> gateway URL and expose ports <code style="font-size:10px">:6080</code> + <code style="font-size:10px">:7681</code> via Tailscale Serve.
         </p>
       </div>
