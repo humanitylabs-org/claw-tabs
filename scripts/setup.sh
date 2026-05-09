@@ -12,6 +12,42 @@ BASE_PATH="${BASE_PATH%/}"
 
 LOCAL_HEALTH="http://${HOST}:${PORT}${BASE_PATH}/api/health"
 
+PANEL_MODE=""
+
+usage() {
+  cat <<'EOF'
+Usage: ./scripts/setup.sh [--with-panels|--with-terminal|--with-browser]
+
+Default setup installs Claw Tabs only.
+Optional flags also configure Browser/Terminal panel dependencies.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --with-panels)
+      PANEL_MODE="--all"
+      shift
+      ;;
+    --with-terminal)
+      PANEL_MODE="--terminal"
+      shift
+      ;;
+    --with-browser)
+      PANEL_MODE="--browser"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1"
+      usage
+      exit 1
+      ;;
+  esac
+done
 
 echo "Step 1/4: prerequisite check"
 ./scripts/prereq-check.sh
@@ -54,4 +90,13 @@ if [[ -n "$DNS_NAME" ]]; then
   echo "✅ Final URL: https://${DNS_NAME}${BASE_PATH}"
 else
   echo "✅ Final URL: https://<this-device>.ts.net${BASE_PATH}"
+fi
+
+if [[ -n "$PANEL_MODE" ]]; then
+  echo
+  echo "Optional panel setup requested (${PANEL_MODE})."
+  ./scripts/setup-panels.sh "$PANEL_MODE"
+else
+  echo
+  echo "Optional: run ./scripts/setup-panels.sh --all to unlock Browser + Terminal tiles."
 fi

@@ -29,6 +29,13 @@ The setup script will:
 3. Expose `/clawtabs` via `tailscale serve`
 4. Verify health + manifest scope
 
+Optional one-command panel onboarding:
+
+```bash
+# Core app + Browser/Terminal tile dependencies
+./scripts/setup.sh --with-panels
+```
+
 ## Run commands
 
 ```bash
@@ -40,6 +47,14 @@ The setup script will:
 
 # Re-apply tailscale path mapping
 ./scripts/serve-path.sh
+
+# Optional panel dependencies (Browser/Terminal tiles)
+./scripts/setup-panels.sh --all
+./scripts/setup-panels.sh --terminal
+./scripts/setup-panels.sh --browser
+
+# Panel readiness JSON (used by the UI unlock hints)
+./scripts/panels-status.sh
 ```
 
 ## Configuration
@@ -57,6 +72,12 @@ export CLAWTABS_PORT=8790
 export CLAWTABS_BASE_PATH=/clawtabs
 ./scripts/setup.sh
 ```
+
+## Panel support (Browser + Terminal tiles)
+
+- **Linux:** full support (terminal + browser panel automation).
+- **macOS:** terminal panel automation supported; browser panel auto-setup is Linux-only for now.
+- If a tile is locked, Claw Tabs now shows an **Install in chat** button that asks your AI to run the exact setup command.
 
 ## Gateway notes
 

@@ -10098,6 +10098,94 @@ function closeDashboard() {
     return cfg === panels.browser ? 'browser' : 'terminal';
   }
 
+  let panelStatusCache = null;
+  let panelStatusFetchedAt = 0;
+  const PANEL_STATUS_TTL_MS = 15000;
+
+  async function fetchPanelStatus(force = false) {
+    const now = Date.now();
+    if (!force && panelStatusCache && (now - panelStatusFetchedAt) < PANEL_STATUS_TTL_MS) {
+      return panelStatusCache;
+    }
+
+    try {
+      const response = await fetch(withBasePath('/api/panels/status'), {
+        method: 'GET',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: { Accept: 'application/json' },
+      });
+      if (!response.ok) return panelStatusCache;
+      const payload = await response.json().catch(() => null);
+      if (!payload || typeof payload !== 'object') return panelStatusCache;
+      panelStatusCache = payload;
+      panelStatusFetchedAt = now;
+      return panelStatusCache;
+    } catch {
+      return panelStatusCache;
+    }
+  }
+
+  function sendPanelSetupCommand(kind, status) {
+    const cmd = kind === 'browser'
+      ? status?.browser?.setupCommand
+      : status?.terminal?.setupCommand;
+
+    if (typeof cmd === 'string' && cmd.trim()) {
+      sendControlAction('Run this command and show me the output: ' + cmd.trim());
+      return;
+    }
+
+    const fallback = kind === 'browser'
+      ? './scripts/setup-panels.sh --browser'
+      : './scripts/setup-panels.sh --terminal';
+    sendControlAction('Run this command from your Claw Tabs repo and show me the output: ' + fallback);
+  }
+
+  function sendPanelDiagnosis(kind) {
+    if (kind === 'browser') {
+      sendControlAction('Check Browser panel prerequisites for this gateway: verify Tailscale Serve :6080 mapping, remote-browser service status, and noVNC availability. If broken, fix and confirm.');
+    } else {
+      sendControlAction('Check Terminal panel prerequisites for this gateway: verify Tailscale Serve :7681 mapping and web-terminal (ttyd) service status. If broken, fix and confirm.');
+    }
+  }
+
+  async function hydrateEmbedHint(kind, hintEl) {
+    if (!hintEl) return;
+    const status = await fetchPanelStatus();
+    if (!status || typeof status !== 'object') return;
+
+    const meta = hintEl.querySelector('[data-panel-meta]');
+    if (!meta) return;
+
+    const support = status?.support || {};
+    const terminal = status?.terminal || {};
+    const browser = status?.browser || {};
+
+    if (kind === 'browser') {
+      if (support.browser === false) {
+        meta.textContent = support.browserReason || 'Browser panel automation is unavailable on this OS.';
+        return;
+      }
+      if (browser.ready === true) {
+        meta.textContent = 'Browser dependencies look ready. Click refresh.';
+        return;
+      }
+      meta.textContent = 'Browser tile is locked until dependencies are installed. Click Install in chat.';
+      return;
+    }
+
+    if (support.terminal === false) {
+      meta.textContent = 'Terminal panel automation is unavailable on this OS.';
+      return;
+    }
+    if (terminal.ready === true) {
+      meta.textContent = 'Terminal dependencies look ready. Click refresh.';
+      return;
+    }
+    meta.textContent = 'Terminal tile is locked until dependencies are installed. Click Install in chat.';
+  }
+
   function renderEmbedHint(cfg, body, reasonText = '') {
     if (!body) return;
     const existing = body.querySelector('.hud-embed-prereq');
@@ -10119,19 +10207,28 @@ function closeDashboard() {
       '<div class="hud-embed-prereq-line">• Gateway URL should be a tailnet host (example: <code>https://your-server.ts.net</code>).</div>' +
       '<div class="hud-embed-prereq-line">• Tailscale Serve must expose <code>:' + port + '</code> on that host.</div>' +
       '<div class="hud-embed-prereq-line">• Service must be running: <code>' + serviceName + '</code>.</div>' +
+      '<div class="hud-embed-prereq-line" data-panel-meta style="opacity:0.86">Checking local panel setup…</div>' +
       (!tailnetOk ? '<div class="hud-embed-prereq-warn">Current host looks non-tailnet. Browser/Terminal may fail outside tailnet.</div>' : '') +
       '<div class="hud-embed-prereq-actions">' +
-        '<button class="hud-embed-prereq-btn" data-embed-kind="' + kind + '">Fix setup in chat</button>' +
+        '<button class="hud-embed-prereq-btn" data-panel-action="diagnose" data-embed-kind="' + kind + '">Diagnose in chat</button>' +
+        '<button class="hud-embed-prereq-btn" data-panel-action="install" data-embed-kind="' + kind + '">Install in chat</button>' +
       '</div>';
 
-    const btn = hint.querySelector('.hud-embed-prereq-btn');
-    btn?.addEventListener('click', () => {
-      if (kind === 'browser') {
-        sendControlAction('Check Browser panel prerequisites for this gateway: verify Tailscale Serve :6080 mapping, remote-browser service status, and noVNC availability. If broken, fix and confirm.');
-      } else {
-        sendControlAction('Check Terminal panel prerequisites for this gateway: verify Tailscale Serve :7681 mapping and web-terminal (ttyd) service status. If broken, fix and confirm.');
+    const diagnoseBtn = hint.querySelector('[data-panel-action="diagnose"]');
+    diagnoseBtn?.addEventListener('click', () => sendPanelDiagnosis(kind));
+
+    const installBtn = hint.querySelector('[data-panel-action="install"]');
+    installBtn?.addEventListener('click', async () => {
+      const status = await fetchPanelStatus(true);
+      if (kind === 'browser' && status?.support?.browser === false) {
+        const reason = status?.support?.browserReason || 'Browser panel automation is unavailable on this OS.';
+        sendControlAction('Browser panel setup note: ' + reason + ' Please keep Terminal panel enabled and use local browser outside the tile for now.');
+        return;
       }
+      sendPanelSetupCommand(kind, status);
     });
+
+    void hydrateEmbedHint(kind, hint);
 
     body.appendChild(hint);
   }

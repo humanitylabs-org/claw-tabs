@@ -110,6 +110,24 @@ fi
 
 ok "base path configured: ${BASE_PATH}"
 
+# Optional panel checks (non-blocking)
+OS_UNAME="$(uname -s)"
+if [[ "$OS_UNAME" == "Linux" ]]; then
+  if command -v ttyd >/dev/null 2>&1; then
+    ok "panel optional dep: ttyd found"
+  else
+    warn "panel optional dep missing: ttyd (run ./scripts/setup-panels.sh --terminal)"
+  fi
+
+  if command -v Xvfb >/dev/null 2>&1 && command -v x11vnc >/dev/null 2>&1; then
+    ok "panel optional deps for browser found (Xvfb + x11vnc)"
+  else
+    warn "panel optional deps missing for browser panel (run ./scripts/setup-panels.sh --browser)"
+  fi
+elif [[ "$OS_UNAME" == "Darwin" ]]; then
+  warn "Browser panel auto-setup is Linux-only right now. Terminal panel is supported on macOS via ./scripts/setup-panels.sh --terminal"
+fi
+
 echo
 if [[ "$FAIL" -ne 0 ]]; then
   echo "Prerequisite check failed (${#FAIL_ITEMS[@]} required issue(s))."

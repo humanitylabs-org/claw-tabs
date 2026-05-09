@@ -3,6 +3,8 @@ import http from "node:http";
 import path from "node:path";
 import { promises as fs } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(SCRIPT_DIR, "..");
@@ -10,6 +12,8 @@ const PORT = Number(process.env.CLAWTABS_PORT || 8788);
 const HOST = process.env.CLAWTABS_HOST || "127.0.0.1";
 const OPENCLAW_CONFIG_PATH = process.env.CLAWTABS_OPENCLAW_CONFIG || "/root/.openclaw/openclaw.json";
 const GATEWAY_URL_OVERRIDE = (process.env.CLAWTABS_GATEWAY_URL || "").trim();
+const PANELS_STATUS_SCRIPT = path.join(ROOT_DIR, "scripts", "panels-status.sh");
+const execFileAsync = promisify(execFile);
 
 function normalizeBasePath(raw = "") {
   const trimmed = String(raw || "").trim();
@@ -123,6 +127,27 @@ async function serveIndex(res, method = "GET") {
   respond(res, 200, data, { "Content-Type": contentType });
 }
 
+async function loadPanelsStatus() {
+  try {
+    const { stdout } = await execFileAsync(PANELS_STATUS_SCRIPT, {
+      cwd: ROOT_DIR,
+      timeout: 6_000,
+      maxBuffer: 512 * 1024,
+    });
+
+    const parsed = JSON.parse(String(stdout || "{}").trim() || "{}");
+    return parsed && typeof parsed === "object"
+      ? parsed
+      : { ok: false, error: "invalid panels status payload" };
+  } catch (err) {
+    return {
+      ok: false,
+      error: "panels status unavailable",
+      detail: err instanceof Error ? err.message : "unknown error",
+    };
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const method = (req.method || "GET").toUpperCase();
@@ -158,6 +183,16 @@ const server = http.createServer(async (req, res) => {
         ? null
         : JSON.stringify({ ok: true, gatewayUrl, token: tokenRecord.token });
 
+      respond(res, 200, body, {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/json; charset=utf-8",
+      });
+      return;
+    }
+
+    if (pathname === `${BASE_PATH}/api/panels/status`) {
+      const status = await loadPanelsStatus();
+      const body = method === "HEAD" ? null : JSON.stringify(status);
       respond(res, 200, body, {
         "Cache-Control": "no-store",
         "Content-Type": "application/json; charset=utf-8",
