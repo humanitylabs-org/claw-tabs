@@ -8,6 +8,8 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(SCRIPT_DIR, "..");
 const PORT = Number(process.env.CLAWTABS_PORT || 8788);
 const HOST = process.env.CLAWTABS_HOST || "127.0.0.1";
+const OPENCLAW_CONFIG_PATH = process.env.CLAWTABS_OPENCLAW_CONFIG || "/root/.openclaw/openclaw.json";
+const GATEWAY_URL_OVERRIDE = (process.env.CLAWTABS_GATEWAY_URL || "").trim();
 
 function normalizeBasePath(raw = "") {
   const trimmed = String(raw || "").trim();
@@ -36,6 +38,8 @@ const MIME = {
 
 const MANIFEST_MIME = "application/manifest+json";
 
+let cachedBootstrap = { at: 0, value: null };
+
 function respond(res, status, body, headers = {}) {
   const baseHeaders = {
     "Cache-Control": "public, max-age=0, must-revalidate",
@@ -49,6 +53,42 @@ function respond(res, status, body, headers = {}) {
 function mimeFor(filePath) {
   if (filePath.endsWith("manifest.json")) return MANIFEST_MIME;
   return MIME[path.extname(filePath).toLowerCase()] || "application/octet-stream";
+}
+
+function inferGatewayUrl(req) {
+  if (GATEWAY_URL_OVERRIDE) return GATEWAY_URL_OVERRIDE;
+
+  const protoRaw = String(req.headers["x-forwarded-proto"] || "https");
+  const hostRaw = String(req.headers["x-forwarded-host"] || req.headers.host || "");
+
+  const proto = protoRaw.split(",")[0].trim() || "https";
+  const host = hostRaw.split(",")[0].trim();
+
+  if (!host) return "";
+  return `${proto}://${host.replace(/\/+$/, "")}`;
+}
+
+async function loadGatewayToken() {
+  const now = Date.now();
+  if (cachedBootstrap.value && now - cachedBootstrap.at < 15_000) {
+    return cachedBootstrap.value;
+  }
+
+  try {
+    const raw = await fs.readFile(OPENCLAW_CONFIG_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    const token = String(parsed?.gateway?.auth?.token || "").trim();
+    if (!token) {
+      cachedBootstrap = { at: now, value: null };
+      return null;
+    }
+    const value = { token };
+    cachedBootstrap = { at: now, value };
+    return value;
+  } catch {
+    cachedBootstrap = { at: now, value: null };
+    return null;
+  }
 }
 
 async function resolveFilePath(requestPath) {
@@ -98,6 +138,30 @@ const server = http.createServer(async (req, res) => {
     if (pathname === `${BASE_PATH}/api/health`) {
       const body = method === "HEAD" ? null : JSON.stringify({ ok: true, app: "claw-tabs", basePath: BASE_PATH, host: HOST, port: PORT });
       respond(res, 200, body, { "Content-Type": "application/json; charset=utf-8" });
+      return;
+    }
+
+    if (pathname === `${BASE_PATH}/bootstrap.json`) {
+      const tokenRecord = await loadGatewayToken();
+      const gatewayUrl = inferGatewayUrl(req);
+
+      if (!tokenRecord?.token || !gatewayUrl) {
+        const body = method === "HEAD" ? null : JSON.stringify({ ok: false, error: "bootstrap unavailable" });
+        respond(res, 503, body, {
+          "Cache-Control": "no-store",
+          "Content-Type": "application/json; charset=utf-8",
+        });
+        return;
+      }
+
+      const body = method === "HEAD"
+        ? null
+        : JSON.stringify({ ok: true, gatewayUrl, token: tokenRecord.token });
+
+      respond(res, 200, body, {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/json; charset=utf-8",
+      });
       return;
     }
 

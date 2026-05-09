@@ -28,6 +28,30 @@ function withBasePath(pathname = "") {
   return `${APP_BASE_PATH}${normalized}`;
 }
 
+async function loadAutoBootstrapConnection() {
+  try {
+    const response = await fetch(withBasePath("/bootstrap.json"), {
+      method: "GET",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    });
+
+    if (!response.ok) return null;
+
+    const payload = await response.json().catch(() => null);
+    if (!payload || payload.ok !== true) return null;
+
+    const gatewayUrl = str(payload.gatewayUrl, "").trim();
+    const token = str(payload.token, "").trim();
+    if (!gatewayUrl || !token) return null;
+
+    return { gatewayUrl, token };
+  } catch {
+    return null;
+  }
+}
+
 const TAB_NAMER_SUFFIX = ":tab-namer";
 const TAB_NAMER_MAX_CHARS = 30;
 const TAB_NAMER_MAX_WORDS = 5;
@@ -1283,8 +1307,25 @@ async function initApp() {
   // Always show chat container
   ui.chatContainer.classList.add("active");
 
+  if (!state.gatewayUrl || !state.token) {
+    const autoConn = await loadAutoBootstrapConnection();
+    if (autoConn?.gatewayUrl && autoConn?.token) {
+      state.gatewayUrl = autoConn.gatewayUrl;
+      state.token = autoConn.token;
+      localStorage.setItem("connection", JSON.stringify({
+        gatewayUrl: autoConn.gatewayUrl,
+        token: autoConn.token,
+      }));
+    }
+  }
+
   if (state.gatewayUrl && state.token) {
-    await startChat();
+    try {
+      await startChat();
+    } catch (err) {
+      console.error("Auto-connect failed:", err);
+      updateConnectionStatus(false);
+    }
   } else {
     updateConnectionStatus(false);
   }

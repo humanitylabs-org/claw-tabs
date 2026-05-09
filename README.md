@@ -12,6 +12,8 @@ This repo is intentionally separate from `usemyclaw.com` / `openclaw-chat` so pu
 - Path-scoped app (`/clawtabs`) so it can coexist with other tailnet apps
 - PWA scope isolated to `/clawtabs/`
 - No dependency on a public hosted frontend
+- Direct-to-tabs startup (no landing/connect wall)
+- Same-host bootstrap: server reads local OpenClaw config and auto-connects the UI
 
 ## Quick start
 

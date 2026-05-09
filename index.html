@@ -1558,7 +1558,7 @@
 </head>
 <body>
   <!-- Landing Page (shown when no saved credentials) -->
-  <div id="landing" class="landing">
+  <div id="landing" class="landing" style="display:none;">
     <div class="landing-inner">
       <nav class="landing-nav">
         <div class="landing-nav-brand">
@@ -1670,7 +1670,7 @@
     </div>
   </div>
 
-  <div class="app" style="display:none;">
+  <div class="app">
     <!-- Dashboard panel -->
     <div class="dashboard" id="dashboard">
       <!-- Skeleton loading state -->
@@ -2126,26 +2126,19 @@
     </div>
   </div>
   <script>
-    // Landing page logic
+    // Local-first behavior: go straight to app tabs.
     (function() {
       var landing = document.getElementById('landing');
       var app = document.querySelector('.app');
-      if (localStorage.getItem('connection')) {
-        landing.style.display = 'none';
-        app.style.display = '';
-      } else {
-        landing.style.display = '';
-        app.style.display = 'none';
-      }
+      if (landing) landing.style.display = 'none';
+      if (app) app.style.display = '';
 
-      // Connect button in modal
+      // Connect button in modal (manual fallback)
       document.getElementById('connect-modal-btn').addEventListener('click', function() {
         var url = (document.getElementById('connect-modal-url').value || '').trim();
         var token = (document.getElementById('connect-modal-token').value || '').trim();
         if (!url || !token) return;
         localStorage.setItem('connection', JSON.stringify({ gatewayUrl: url, token: token }));
-        landing.style.display = 'none';
-        app.style.display = '';
         document.getElementById('connect-modal-overlay').classList.remove('open');
         if (typeof state !== 'undefined') {
           state.gatewayUrl = url;
