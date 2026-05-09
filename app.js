@@ -810,6 +810,8 @@ const state = {
   reconnectSince: 0,
   reconnectHintTimer: null,
   onboardingHintShown: false,
+  pairingRequired: false,
+  pairingRequestId: "",
   connectionDebug: [],
   connectionDebugMax: 120,
   
@@ -1345,56 +1347,78 @@ function showStatus(message, type) {
   console.log(`[${type}] ${message}`);
 }
 
+function isPairingRequiredReason(reason = "") {
+  return /pairing required/i.test(String(reason || ""));
+}
+
+function extractRequestId(reason = "") {
+  const m = String(reason || "").match(/requestId:\s*([a-f0-9-]+)/i);
+  return m?.[1] || "";
+}
+
 function showPairingBanner() {
-  if (document.getElementById("pairing-banner")) return;
+  const existing = document.getElementById("pairing-banner");
+  if (existing) existing.remove();
 
   const deviceShort = state.deviceIdentity?.deviceId?.slice(0, 12) || "unknown";
+  const requestId = state.pairingRequestId || "";
 
   const banner = document.createElement("div");
   banner.id = "pairing-banner";
   banner.innerHTML = `
-    <div style="position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;">
-      <div style="max-width:420px;width:calc(100% - 2rem);background:#1a1a1e;border:1px solid rgba(74,158,255,0.3);border-radius:12px;padding:1.2rem 1.4rem;box-shadow:0 8px 32px rgba(0,0,0,0.6);color:#eee;font-size:0.88em;line-height:1.5;">
-        <div style="margin-bottom:0.75rem;">
-          <strong style="color:var(--interactive-accent);font-size:1.05em;">🔐 Device pairing required</strong>
+    <div style="position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;padding:1rem;">
+      <div style="max-width:460px;width:100%;background:#1a1a1e;border:1px solid rgba(74,158,255,0.28);border-radius:14px;padding:1.1rem 1.2rem;box-shadow:0 8px 32px rgba(0,0,0,0.6);color:#eee;line-height:1.45;">
+        <div style="margin-bottom:0.55rem;">
+          <strong style="font-size:1.03em;">One-time setup: approve this browser</strong>
         </div>
-        <p style="margin:0 0 0.5rem;color:#ccc;">
-          This device (<code style="background:#28282d;padding:0.15em 0.4em;border-radius:4px;font-size:0.85em;">${deviceShort}</code>) needs to be approved by your gateway.
+        <p style="margin:0 0 0.7rem;color:#cfcfd4;font-size:0.86em;">
+          Device <code style="background:#28282d;padding:0.15em 0.4em;border-radius:4px;font-size:0.82em;">${deviceShort}</code> needs approval before Claw Tabs can connect.
         </p>
+        ${requestId ? `<p style="margin:0 0 0.7rem;color:#9da4b0;font-size:0.78em;">Request ID: <code style="background:#28282d;padding:0.1em 0.3em;border-radius:4px;">${requestId}</code></p>` : ""}
 
-        <div style="margin:0.75rem 0;">
-          <p style="color:#999;font-size:0.8em;margin-bottom:0.35rem;font-weight:500;">Option 1 — Run on the server:</p>
-          <div id="pairing-cmd" style="background:#111;border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:0.55rem 0.75rem;font-family:monospace;font-size:0.82em;color:#eee;cursor:pointer;position:relative;user-select:all;" title="Click to copy">
-            openclaw devices approve --latest
-            <span id="pairing-copy-feedback" style="position:absolute;right:0.6rem;top:50%;transform:translateY(-50%);font-size:0.75em;color:#888;">📋</span>
-          </div>
+        <div style="background:#111;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:0.65rem 0.75rem;margin-bottom:0.55rem;">
+          <div style="font-size:0.78em;color:#a7acb5;margin-bottom:0.28rem;">Step 1 — Tell your AI:</div>
+          <div style="font-size:0.88em;color:#ececf2;">“approve the pending device”</div>
+          <button id="pairing-copy-msg" style="margin-top:0.45rem;background:#2f3542;color:#f2f2f2;border:0;border-radius:8px;padding:0.38rem 0.62rem;font-size:0.78em;cursor:pointer;">Copy message</button>
         </div>
 
-        <div style="margin-bottom:0.5rem;">
-          <p style="color:#999;font-size:0.8em;margin-bottom:0.2rem;font-weight:500;">Option 2 — Ask your bot:</p>
-          <p style="color:#ccc;font-size:0.82em;margin:0;">
-            Message your bot on Telegram, Discord, etc: <em>"approve the pending device"</em>
-          </p>
+        <div style="background:#111;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:0.65rem 0.75rem;margin-bottom:0.75rem;">
+          <div style="font-size:0.78em;color:#a7acb5;margin-bottom:0.28rem;">Or run on server:</div>
+          <div id="pairing-cmd" style="font-family:monospace;font-size:0.82em;color:#ececf2;user-select:all;">openclaw devices approve --latest</div>
+          <button id="pairing-copy-cmd" style="margin-top:0.45rem;background:#2f3542;color:#f2f2f2;border:0;border-radius:8px;padding:0.38rem 0.62rem;font-size:0.78em;cursor:pointer;">Copy command</button>
         </div>
 
-        <div style="display:flex;align-items:center;gap:0.5rem;margin-top:0.75rem;padding-top:0.6rem;border-top:1px solid rgba(255,255,255,0.06);">
-          <div class="spinner" style="width:14px;height:14px;border-width:2px;"></div>
-          <span style="color:#888;font-size:0.82em;">Waiting for approval — will connect automatically...</span>
+        <div style="display:flex;gap:0.55rem;flex-wrap:wrap;">
+          <button id="pairing-retry" style="background:#f2f2f2;color:#0b0b0d;border:0;border-radius:8px;padding:0.5rem 0.75rem;font-size:0.8em;cursor:pointer;">I approved it — reconnect</button>
+          <button id="pairing-repair" style="background:transparent;color:#c7ccd6;border:1px solid rgba(255,255,255,0.18);border-radius:8px;padding:0.5rem 0.75rem;font-size:0.8em;cursor:pointer;">Use a new device ID</button>
+          <button id="pairing-show-logs" style="background:transparent;color:#8f95a1;border:0;padding:0.5rem 0.2rem;font-size:0.76em;cursor:pointer;">Show logs</button>
         </div>
-        <p style="margin:0.55rem 0 0;color:#8f8f95;font-size:0.76em;line-height:1.35;">
-          If Claw Tabs still cannot connect after approval, check gateway setup: if the app runs on a different tailnet hostname, add that origin to <code style="background:#28282d;padding:0.1em 0.3em;border-radius:4px;font-size:0.85em;">gateway.controlUi.allowedOrigins</code>, and confirm <code style="background:#28282d;padding:0.1em 0.3em;border-radius:4px;font-size:0.85em;">tailscale serve status</code> is active.
-        </p>
       </div>
     </div>
   `;
 
   document.body.appendChild(banner);
 
-  document.getElementById("pairing-cmd")?.addEventListener("click", () => {
-    navigator.clipboard.writeText("openclaw devices approve --latest").then(() => {
-      const fb = document.getElementById("pairing-copy-feedback");
-      if (fb) { fb.textContent = "✓ copied"; setTimeout(() => { fb.textContent = "📋"; }, 1500); }
-    }).catch(() => {});
+  document.getElementById("pairing-copy-msg")?.addEventListener("click", () => {
+    navigator.clipboard.writeText("approve the pending device").catch(() => {});
+  });
+
+  document.getElementById("pairing-copy-cmd")?.addEventListener("click", () => {
+    navigator.clipboard.writeText("openclaw devices approve --latest").catch(() => {});
+  });
+
+  document.getElementById("pairing-retry")?.addEventListener("click", () => {
+    void retryConnectionNow();
+  });
+
+  document.getElementById("pairing-repair")?.addEventListener("click", () => {
+    void rePairThisBrowser();
+  });
+
+  document.getElementById("pairing-show-logs")?.addEventListener("click", () => {
+    const panel = document.getElementById("reconnect-debug");
+    if (panel) panel.classList.remove("oc-hidden");
+    openDashboard();
   });
 }
 
@@ -1411,6 +1435,8 @@ async function connectToGateway() {
         console.log("Connected to gateway:", payload);
         addConnectionDebug("connected: hello received");
         helloReceived = true;
+        state.pairingRequired = false;
+        state.pairingRequestId = "";
         localStorage.setItem("deviceApproved", "true");
         state.snapshot = payload?.snapshot || {};
         state.serverVersion = payload?.server?.version || '';
@@ -1422,12 +1448,23 @@ async function connectToGateway() {
       },
       onClose: (info) => {
         console.log("Gateway connection closed:", info);
-        addConnectionDebug(`gateway closed (${info?.code || "?"}${info?.reason ? `: ${info.reason}` : ""})`);
-        updateConnectionStatus(false);
-        if (!helloReceived && info.reason === "pairing required" && !pairingDetected) {
+        const reason = info?.reason || "";
+        const pairingRequired = !helloReceived && isPairingRequiredReason(reason);
+
+        if (pairingRequired && !pairingDetected) {
           pairingDetected = true;
+          state.pairingRequired = true;
+          state.pairingRequestId = extractRequestId(reason);
+          addConnectionDebug("pairing required: approve this device once, then reconnect");
+          try { state.gateway?.stop(); } catch {}
+          updateConnectionStatus(false);
           showPairingBanner();
+          reject(new Error("pairing required"));
+          return;
         }
+
+        addConnectionDebug(`gateway closed (${info?.code || "?"}${reason ? `: ${reason}` : ""})`);
+        updateConnectionStatus(false);
       },
       onGap: (info) => {
         console.warn("Gateway event gap detected:", info);
@@ -1604,6 +1641,8 @@ function updateConnectionStatus(connected) {
     state.reconnecting = false;
     state.gatewayRestarting = false;
     state.reconnectSince = 0;
+    state.pairingRequired = false;
+    state.pairingRequestId = "";
     ui.sendBtn.classList.remove("oc-hidden");
     ui.messageInput.disabled = false;
     updateComposerPlaceholder();
@@ -1613,6 +1652,17 @@ function updateConnectionStatus(connected) {
     stopHistoryInFlightPoll();
     ui.sendBtn.classList.add("oc-hidden");
     ui.messageInput.disabled = true;
+
+    if (state.pairingRequired) {
+      clearReconnectHintTimer();
+      state.reconnecting = false;
+      ui.messageInput.placeholder = "Approve this device, then reconnect";
+      hideReconnectBanner();
+      showPairingBanner();
+      updateDashboard();
+      return;
+    }
+
     if (state.gatewayRestarting) {
       clearReconnectHintTimer();
       ui.messageInput.placeholder = "Gateway restarting…";
@@ -1662,11 +1712,13 @@ function clearLocalConnectionAndReturnToLanding({ showConnectModal = false } = {
   state.gatewayRestarting = false;
   state.reconnectSince = 0;
   state.onboardingHintShown = false;
+  state.pairingRequired = false;
+  state.pairingRequestId = "";
 
   const landing = document.getElementById("landing");
   const app = document.querySelector(".app");
-  if (landing) landing.style.display = "";
-  if (app) app.style.display = "none";
+  if (landing) landing.style.display = "none";
+  if (app) app.style.display = "";
 
   hideReconnectBanner();
 
@@ -1687,6 +1739,10 @@ async function retryConnectionNow() {
   try { state.gateway?.stop(); } catch {}
   state.gateway = null;
 
+  state.pairingRequired = false;
+  state.pairingRequestId = "";
+  document.getElementById("pairing-banner")?.remove();
+
   showReconnectBanner("Retrying connection…");
   addConnectionDebug("manual action: retry");
   try {
@@ -1706,6 +1762,10 @@ async function rePairThisBrowser() {
   stopHistoryInFlightPoll();
   try { state.gateway?.stop(); } catch {}
   state.gateway = null;
+
+  state.pairingRequired = false;
+  state.pairingRequestId = "";
+  document.getElementById("pairing-banner")?.remove();
 
   localStorage.removeItem("deviceIdentity");
   localStorage.removeItem("deviceApproved");
