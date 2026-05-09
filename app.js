@@ -1362,6 +1362,12 @@ function showPairingBanner() {
 
   const deviceShort = state.deviceIdentity?.deviceId?.slice(0, 12) || "unknown";
   const requestId = state.pairingRequestId || "";
+  const aiApprovalMessage = requestId
+    ? `approve pending device request ID ${requestId}`
+    : "approve the pending device";
+  const serverApprovalCommand = requestId
+    ? `openclaw devices approve ${requestId}`
+    : "openclaw devices approve --latest";
 
   const banner = document.createElement("div");
   banner.id = "pairing-banner";
@@ -1377,14 +1383,14 @@ function showPairingBanner() {
         ${requestId ? `<p style="margin:0 0 0.7rem;color:#9da4b0;font-size:0.78em;">Request ID: <code style="background:#28282d;padding:0.1em 0.3em;border-radius:4px;">${requestId}</code></p>` : ""}
 
         <div style="background:#111;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:0.65rem 0.75rem;margin-bottom:0.55rem;">
-          <div style="font-size:0.78em;color:#a7acb5;margin-bottom:0.28rem;">Step 1 — Tell your AI:</div>
-          <div style="font-size:0.88em;color:#ececf2;">“approve the pending device”</div>
+          <div style="font-size:0.78em;color:#a7acb5;margin-bottom:0.28rem;">Option 1 — Tell your AI:</div>
+          <div style="font-size:0.88em;color:#ececf2;">“${aiApprovalMessage}”</div>
           <button id="pairing-copy-msg" style="margin-top:0.45rem;background:#2f3542;color:#f2f2f2;border:0;border-radius:8px;padding:0.38rem 0.62rem;font-size:0.78em;cursor:pointer;">Copy message</button>
         </div>
 
         <div style="background:#111;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:0.65rem 0.75rem;margin-bottom:0.75rem;">
-          <div style="font-size:0.78em;color:#a7acb5;margin-bottom:0.28rem;">Or run on server:</div>
-          <div id="pairing-cmd" style="font-family:monospace;font-size:0.82em;color:#ececf2;user-select:all;">openclaw devices approve --latest</div>
+          <div style="font-size:0.78em;color:#a7acb5;margin-bottom:0.28rem;">Option 2 — Run on server:</div>
+          <div id="pairing-cmd" style="font-family:monospace;font-size:0.82em;color:#ececf2;user-select:all;">${serverApprovalCommand}</div>
           <button id="pairing-copy-cmd" style="margin-top:0.45rem;background:#2f3542;color:#f2f2f2;border:0;border-radius:8px;padding:0.38rem 0.62rem;font-size:0.78em;cursor:pointer;">Copy command</button>
         </div>
 
@@ -1400,11 +1406,11 @@ function showPairingBanner() {
   document.body.appendChild(banner);
 
   document.getElementById("pairing-copy-msg")?.addEventListener("click", () => {
-    navigator.clipboard.writeText("approve the pending device").catch(() => {});
+    navigator.clipboard.writeText(aiApprovalMessage).catch(() => {});
   });
 
   document.getElementById("pairing-copy-cmd")?.addEventListener("click", () => {
-    navigator.clipboard.writeText("openclaw devices approve --latest").catch(() => {});
+    navigator.clipboard.writeText(serverApprovalCommand).catch(() => {});
   });
 
   document.getElementById("pairing-retry")?.addEventListener("click", () => {
