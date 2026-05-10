@@ -49,19 +49,23 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-echo "Step 1/4: prerequisite check"
+echo "Step 1/5: prerequisite check"
 ./scripts/prereq-check.sh
 
 echo
-echo "Step 2/4: start local app server"
+echo "Step 2/5: start local app server"
 ./scripts/start.sh
 
 echo
-echo "Step 3/4: expose tailnet path"
+echo "Step 3/5: expose tailnet path"
 ./scripts/serve-path.sh
 
 echo
-echo "Step 4/4: verify install"
+echo "Step 4/5: install/verify systemd auto-start"
+./scripts/install-service.sh
+
+echo
+echo "Step 5/5: verify install"
 if curl -fsS "$LOCAL_HEALTH" >/dev/null; then
   echo "✅ Local health check passed: $LOCAL_HEALTH"
 else
