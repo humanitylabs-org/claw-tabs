@@ -197,6 +197,8 @@ ExecStart=/usr/local/bin/ttyd \
   --writable \
   --max-clients 3 \
   --ping-interval 30 \
+  --client-option titleFixed=Tailnet-Terminal \
+  --client-option title=Tailnet-Terminal \
   bash
 Restart=on-failure
 RestartSec=5
@@ -232,7 +234,7 @@ setup_terminal_macos() {
   fi
 
   if [[ ! -f "$pid_file" ]]; then
-    nohup ttyd --interface 127.0.0.1 --port 7681 --writable --max-clients 3 --ping-interval 30 "$SHELL" -l >"$log_file" 2>&1 &
+    nohup ttyd --interface 127.0.0.1 --port 7681 --writable --max-clients 3 --ping-interval 30 --client-option titleFixed=Tailnet-Terminal --client-option title=Tailnet-Terminal "$SHELL" -l >"$log_file" 2>&1 &
     echo "$!" >"$pid_file"
     sleep 0.6
   fi
@@ -320,6 +322,38 @@ else
   exit 1
 fi
 
+NOVNC_WEB_ROOT="/usr/local/share/remote-browser/novnc"
+mkdir -p "$NOVNC_WEB_ROOT"
+for item in /usr/share/novnc/*; do
+  name="$(basename "$item")"
+  [[ "$name" == "index.html" ]] && continue
+  ln -sfn "$item" "$NOVNC_WEB_ROOT/$name"
+done
+cat >"$NOVNC_WEB_ROOT/index.html" <<'HTML'
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="theme-color" content="#0B0B0D" />
+  <title>🧭 Tailnet Browser</title>
+</head>
+<body style="margin:0;background:#0B0B0D;color:#F2F2F2;font:16px system-ui,-apple-system,sans-serif;display:grid;place-items:center;min-height:100vh;">
+  <p>Launching Tailnet Browser…</p>
+  <script>
+    (function () {
+      const fromPathRoute = (window.location.pathname || '').startsWith('/browser');
+      const wsPath = fromPathRoute ? 'browser/websockify' : 'websockify';
+      const page = fromPathRoute ? '/browser/vnc_auto.html' : 'vnc_auto.html';
+      const title = '🧭 Tailnet Browser';
+      const target = `${page}?path=${encodeURIComponent(wsPath)}&title=${encodeURIComponent(title)}`;
+      window.location.replace(target);
+    })();
+  </script>
+</body>
+</html>
+HTML
+
 PROFILE_DIR="/tmp/clawtabs-remote-browser"
 mkdir -p "$PROFILE_DIR"
 
@@ -343,9 +377,9 @@ x11vnc -display :99 -nopw -forever -shared -localhost -bg
 sleep 1
 
 if [[ "$NOVNC_LAUNCH" == *"launch.sh" ]]; then
-  "$NOVNC_LAUNCH" --listen 127.0.0.1:6080 --vnc localhost:5900
+  "$NOVNC_LAUNCH" --listen 127.0.0.1:6080 --vnc localhost:5900 --web "$NOVNC_WEB_ROOT"
 else
-  "$NOVNC_LAUNCH" --listen localhost:6080 --vnc localhost:5900
+  "$NOVNC_LAUNCH" --listen localhost:6080 --vnc localhost:5900 --web "$NOVNC_WEB_ROOT"
 fi
 
 kill "$XVFB_PID" 2>/dev/null || true
@@ -393,11 +427,19 @@ print_summary() {
   echo
   echo "Panel setup complete."
   if [[ -n "$dns_name" ]]; then
-    [[ "$WANT_TERMINAL" -eq 1 ]] && echo "- Terminal: https://${dns_name}:7681"
-    [[ "$WANT_BROWSER" -eq 1 ]] && echo "- Browser:  https://${dns_name}:6080"
+    if [[ "$WANT_TERMINAL" -eq 1 ]]; then
+      echo "- Terminal: https://${dns_name}:7681"
+    fi
+    if [[ "$WANT_BROWSER" -eq 1 ]]; then
+      echo "- Browser:  https://${dns_name}:6080"
+    fi
   else
-    [[ "$WANT_TERMINAL" -eq 1 ]] && echo "- Terminal: https://<this-device>.ts.net:7681"
-    [[ "$WANT_BROWSER" -eq 1 ]] && echo "- Browser:  https://<this-device>.ts.net:6080"
+    if [[ "$WANT_TERMINAL" -eq 1 ]]; then
+      echo "- Terminal: https://<this-device>.ts.net:7681"
+    fi
+    if [[ "$WANT_BROWSER" -eq 1 ]]; then
+      echo "- Browser:  https://<this-device>.ts.net:6080"
+    fi
   fi
 }
 

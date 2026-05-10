@@ -1,7 +1,7 @@
 {
   "id": "/clawtabs/",
   "name": "Claw Tabs",
-  "short_name": "ClawTabs",
+  "short_name": "Claw Tabs",
   "description": "Local-first interface for OpenClaw, hosted on your own tailnet URL.",
   "start_url": "/clawtabs/",
   "scope": "/clawtabs/",
@@ -10,6 +10,12 @@
   "theme_color": "#0B0B0D",
   "orientation": "portrait-primary",
   "icons": [
+    {
+      "src": "favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
     {
       "src": "icon-192.png",
       "sizes": "192x192",
