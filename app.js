@@ -1167,7 +1167,7 @@ function totalUnread() {
 /** Update document.title with unread count */
 function updateDocumentTitle() {
   const n = totalUnread();
-  const base = "🦾 Claw Tabs";
+  const base = "Claw Tabs";
   document.title = n > 0 ? `(${n}) ${base}` : base;
 }
 

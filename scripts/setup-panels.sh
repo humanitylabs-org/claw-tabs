@@ -336,7 +336,7 @@ cat >"$NOVNC_WEB_ROOT/index.html" <<'HTML'
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <meta name="theme-color" content="#0B0B0D" />
-  <title>🧭 Tailnet Browser</title>
+  <title>Tailnet Browser</title>
 </head>
 <body style="margin:0;background:#0B0B0D;color:#F2F2F2;font:16px system-ui,-apple-system,sans-serif;display:grid;place-items:center;min-height:100vh;">
   <p>Launching Tailnet Browser…</p>
@@ -345,7 +345,7 @@ cat >"$NOVNC_WEB_ROOT/index.html" <<'HTML'
       const fromPathRoute = (window.location.pathname || '').startsWith('/browser');
       const wsPath = fromPathRoute ? 'browser/websockify' : 'websockify';
       const page = fromPathRoute ? '/browser/vnc_auto.html' : 'vnc_auto.html';
-      const title = '🧭 Tailnet Browser';
+      const title = 'Tailnet Browser';
       const target = `${page}?path=${encodeURIComponent(wsPath)}&title=${encodeURIComponent(title)}`;
       window.location.replace(target);
     })();
