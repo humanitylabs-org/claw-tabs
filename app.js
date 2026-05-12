@@ -798,7 +798,7 @@ const state = {
     heartbeatSession: "main",
     heartbeatTarget: "",
     heartbeatTo: "",
-    llmIdleTimeoutSeconds: 60,
+    llmIdleTimeoutSeconds: 120,
   },
   
   // Pending default changes (not yet applied to config)
@@ -1928,11 +1928,14 @@ async function loadDefaults() {
     const thinking = ad?.thinkingDefault || "";
     const reasoning = ad?.reasoningDefault || "";
     const verbose = ad?.verboseDefault || "";
-    const parsedIdleTimeoutSeconds = Number(ad?.llm?.idleTimeoutSeconds);
+    const parsedIdleTimeoutSeconds = Number(ad?.timeoutSeconds);
+    const parsedLegacyIdleTimeoutSeconds = Number(ad?.llm?.idleTimeoutSeconds);
     const resolvedIdleTimeout = Number.isFinite(parsedIdleTimeoutSeconds) && parsedIdleTimeoutSeconds > 0
       ? Math.round(parsedIdleTimeoutSeconds)
-      : 60;
-    const llmIdleTimeoutSeconds = normalizeIdleTimeoutSeconds(resolvedIdleTimeout, 60);
+      : (Number.isFinite(parsedLegacyIdleTimeoutSeconds) && parsedLegacyIdleTimeoutSeconds > 0
+        ? Math.round(parsedLegacyIdleTimeoutSeconds)
+        : DEFAULT_LLM_IDLE_TIMEOUT_SECONDS);
+    const llmIdleTimeoutSeconds = normalizeIdleTimeoutSeconds(resolvedIdleTimeout, DEFAULT_LLM_IDLE_TIMEOUT_SECONDS);
 
     const resetCfg = parsed?.session?.reset || cfg?.session?.reset || {};
     const resetMode = resetCfg?.mode === "idle" ? "idle" : "daily";
@@ -3333,7 +3336,7 @@ const TRANSCRIPT_IN_FLIGHT_MAX_AGE_MS = 5 * 60 * 1000;
 function resolvedLlmIdleTimeoutMs() {
   const sec = Number(state?.defaults?.llmIdleTimeoutSeconds);
   if (Number.isFinite(sec) && sec > 0) return Math.round(sec * 1000);
-  return 60_000;
+  return DEFAULT_LLM_IDLE_TIMEOUT_SECONDS * 1000;
 }
 
 function streamSilenceHardMs() {
@@ -8828,10 +8831,14 @@ function defaultOptionLabel(key, opt) {
   return opt;
 }
 
-function normalizeIdleTimeoutSeconds(raw, fallback = 60) {
+function normalizeIdleTimeoutSeconds(raw, fallback = DEFAULT_LLM_IDLE_TIMEOUT_SECONDS) {
+  const fallbackSec = Math.max(
+    MIN_LLM_IDLE_TIMEOUT_SECONDS,
+    Math.min(MAX_EFFECTIVE_LLM_IDLE_TIMEOUT_SECONDS, Math.round(Number(fallback) || DEFAULT_LLM_IDLE_TIMEOUT_SECONDS))
+  );
   const n = Number(raw);
-  if (!Number.isFinite(n)) return Math.max(60, Math.round(Number(fallback) || 60));
-  return Math.max(60, Math.round(n));
+  if (!Number.isFinite(n)) return fallbackSec;
+  return Math.max(MIN_LLM_IDLE_TIMEOUT_SECONDS, Math.min(MAX_EFFECTIVE_LLM_IDLE_TIMEOUT_SECONDS, Math.round(n)));
 }
 
 function buildIdleTimeoutOptions(currentSec) {
@@ -8845,16 +8852,18 @@ function buildIdleTimeoutOptions(currentSec) {
     out.push({ value: sec, label });
   };
 
-  push(currentSec, `Current (${normalizeIdleTimeoutSeconds(currentSec)}s)`);
-  push(RECOMMENDED_LLM_IDLE_TIMEOUT_SECONDS, `Recommended (${RECOMMENDED_LLM_IDLE_TIMEOUT_SECONDS}s · 10m)`);
-  push(VERY_HIGH_LLM_IDLE_TIMEOUT_SECONDS, `Very high (${VERY_HIGH_LLM_IDLE_TIMEOUT_SECONDS}s · 20m)`);
+  const normalizedCurrent = normalizeIdleTimeoutSeconds(currentSec);
+  push(normalizedCurrent, `Current (${normalizedCurrent}s)`);
+  push(RECOMMENDED_LLM_IDLE_TIMEOUT_SECONDS, `Recommended (${RECOMMENDED_LLM_IDLE_TIMEOUT_SECONDS}s · max effective)`);
 
   return out;
 }
 
 const RESET_IDLE_MINUTES_OPTIONS = [60, 120, 240, 480, 720, 1440, 2880, 10080];
-const RECOMMENDED_LLM_IDLE_TIMEOUT_SECONDS = 600;
-const VERY_HIGH_LLM_IDLE_TIMEOUT_SECONDS = 1200;
+const MIN_LLM_IDLE_TIMEOUT_SECONDS = 60;
+const DEFAULT_LLM_IDLE_TIMEOUT_SECONDS = 120;
+const RECOMMENDED_LLM_IDLE_TIMEOUT_SECONDS = 120;
+const MAX_EFFECTIVE_LLM_IDLE_TIMEOUT_SECONDS = 120;
 const HEARTBEAT_OPTIONS = [
   { value: "0m", label: "off" },
   { value: "30m", label: "30 min" },
@@ -8890,8 +8899,8 @@ function updateDefaultsPanel() {
   const currentIdleTimeout = normalizeIdleTimeoutSeconds(
     Number.isFinite(pendingIdleTimeoutRaw)
       ? Math.round(pendingIdleTimeoutRaw)
-      : (Number.isFinite(defaultIdleTimeoutRaw) ? Math.round(defaultIdleTimeoutRaw) : 60),
-    60
+      : (Number.isFinite(defaultIdleTimeoutRaw) ? Math.round(defaultIdleTimeoutRaw) : DEFAULT_LLM_IDLE_TIMEOUT_SECONDS),
+    DEFAULT_LLM_IDLE_TIMEOUT_SECONDS
   );
   const idleTimeoutPending = "llmIdleTimeoutSeconds" in state.pendingDefaults;
 
@@ -8920,7 +8929,7 @@ function updateDefaultsPanel() {
     }).join('');
 
     return '<div class="hud-defaults-row">' +
-      '<span class="hud-defaults-label">Model idle timeout</span>' +
+      '<span class="hud-defaults-label">Model idle timeout (60–120s)</span>' +
       '<select class="hud-defaults-select" data-default-key="llmIdleTimeoutSeconds"' + cls + '>' + optionsHtml + '</select>' +
     '</div>';
   }
@@ -8943,7 +8952,7 @@ function updateDefaultsPanel() {
     ? 'Changes are staged. Click Save to apply. Applies to new tabs. Current tab keeps its existing settings.'
     : 'Defaults are saved. Applies to new tabs. Current tab keeps its existing settings.';
 
-  html += '<div style="margin-top:6px;font-size:11px;line-height:1.35;color:var(--text-muted);opacity:0.85">' + statusLine + ' Model idle timeout applies after save/restart. Recommended: 600s.</div>';
+  html += '<div style="margin-top:6px;font-size:11px;line-height:1.35;color:var(--text-muted);opacity:0.85">' + statusLine + ' Model idle timeout applies after save/restart. Non-cron runs cap at 120s.</div>';
 
   if (hasPending) {
     html += '<button class="hud-defaults-apply" id="hud-defaults-apply" onclick="applyPendingDefaults()">Save</button>';
@@ -9229,7 +9238,7 @@ async function applyPendingDefaults() {
     if ("llmIdleTimeoutSeconds" in state.pendingDefaults) {
       const rawSecs = Number(state.pendingDefaults.llmIdleTimeoutSeconds);
       const idleTimeoutSeconds = normalizeIdleTimeoutSeconds(rawSecs, RECOMMENDED_LLM_IDLE_TIMEOUT_SECONDS);
-      agentDefaultsPatch.llm = { idleTimeoutSeconds };
+      agentDefaultsPatch.timeoutSeconds = idleTimeoutSeconds;
     }
 
     if (state.pendingDefaults.model || ("fallbacks" in state.pendingDefaults)) {
