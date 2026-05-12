@@ -8111,9 +8111,9 @@ function updateServerPanel() {
 
   html += '<div class="hud-server-group-title">Maintenance</div>' +
     '<div class="hud-settings-actions">' +
-      '<button class="hud-server-action" onclick="sendControlAction(\'Run openclaw doctor. Summarize results.\')" title="Health check">check-up</button>' +
-      '<button class="hud-server-action" onclick="sendControlAction(\'Security audit: firewall, SSH, ports, updates. Brief summary.\')">security</button>' +
-      '<button class="hud-server-action" onclick="sendControlAction(\'Restart the gateway. Confirm when back.\')">restart</button>' +
+      '<button class="hud-server-action" data-maintenance-action="checkup" onclick="runGatewayCheckup()" title="Run gateway diagnostics">check-up</button>' +
+      '<button class="hud-server-action" data-maintenance-action="security" onclick="runGatewaySecurityAudit()" title="Run security audit skill">security</button>' +
+      '<button class="hud-server-action" data-maintenance-action="restart" onclick="runGatewayRestart()" title="Restart gateway process">restart</button>' +
     '</div>' +
     '<div class="hud-settings-actions">' +
       '<button class="hud-server-action" onclick="sendControlAction(\'Optimize my agent startup speed. Audit AGENTS.md startup sequence — remove instructions to re-read files already injected in the system prompt (SOUL.md, USER.md, TOOLS.md, IDENTITY.md, HEARTBEAT.md). Then check MEMORY.md size — if over 16k chars, restructure it: move deep project details to memory/projects/ files, keep concise summaries in MEMORY.md. Goal: MEMORY.md under 16k so it fits in the system prompt without truncation, eliminating the need to re-read it. Report what you changed and the before/after size.\')" title="Speed up session boot time">optimize startup</button>' +
@@ -9792,6 +9792,119 @@ async function confirmDisconnect() {
   const ok = await confirmClose('Disconnect?', 'This will unpair your device. You\'ll need to re-enter your gateway URL and token to reconnect.');
   if (!ok) return;
   document.getElementById('dash-disconnect-btn')?.click();
+}
+
+function setMaintenanceButtonsBusy(action, busy, busyText) {
+  const buttons = Array.from(document.querySelectorAll(`[data-maintenance-action="${action}"]`));
+  buttons.forEach((btn) => {
+    if (busy) {
+      if (!btn.dataset.prevText) btn.dataset.prevText = btn.textContent || '';
+      btn.disabled = true;
+      if (busyText) btn.textContent = busyText;
+      return;
+    }
+    btn.disabled = false;
+    if (btn.dataset.prevText) btn.textContent = btn.dataset.prevText;
+    delete btn.dataset.prevText;
+  });
+}
+
+async function sendDirectControlMessage(message, bannerText) {
+  if (!state.gateway?.connected) return false;
+
+  closeDashboard();
+  if (bannerText) showBanner(bannerText);
+
+  await state.gateway.request('chat.send', {
+    sessionKey: prefixedSessionKeyForTab(state.sessionKey || 'main'),
+    message,
+    deliver: false,
+    idempotencyKey: generateId(),
+  });
+
+  return true;
+}
+
+async function runGatewayCheckup() {
+  if (!state.gateway?.connected) return;
+
+  setMaintenanceButtonsBusy('checkup', true, 'running…');
+  try {
+    await sendDirectControlMessage('/diagnostics', 'Running diagnostics…');
+    showBanner('Diagnostics started. Results will appear in chat.');
+    setTimeout(() => hideBanner(), 5000);
+  } catch (err) {
+    console.warn('Diagnostics request failed:', err);
+    showBanner('Could not start diagnostics. Try again.');
+    setTimeout(() => hideBanner(), 8000);
+  } finally {
+    setMaintenanceButtonsBusy('checkup', false);
+  }
+}
+
+async function runGatewaySecurityAudit() {
+  if (!state.gateway?.connected) return;
+
+  setMaintenanceButtonsBusy('security', true, 'running…');
+  try {
+    await sendDirectControlMessage('/healthcheck', 'Starting security audit…');
+    showBanner('Security audit started. Results will appear in chat.');
+    setTimeout(() => hideBanner(), 5000);
+  } catch (err) {
+    console.warn('Security audit request failed:', err);
+    showBanner('Could not start security audit. Try again.');
+    setTimeout(() => hideBanner(), 8000);
+  } finally {
+    setMaintenanceButtonsBusy('security', false);
+  }
+}
+
+async function runGatewayRestart() {
+  if (!state.gateway?.connected) return;
+
+  const ok = window.confirm('Restart OpenClaw gateway now?');
+  if (!ok) return;
+
+  setMaintenanceButtonsBusy('restart', true, 'restarting…');
+  closeDashboard();
+
+  try {
+    state.gatewayRestarting = true;
+    showBanner('Requesting gateway restart…');
+
+    const raw = await state.gateway.request('gateway.restart.request', {
+      reason: 'claw-tabs maintenance restart',
+    });
+    const result = raw?.result || raw || {};
+    const status = result?.status || '';
+    const summary = result?.preflight?.summary || '';
+
+    if (status === 'deferred') {
+      state.gatewayRestarting = false;
+      showBanner(summary ? `Restart deferred: ${summary}` : 'Restart deferred due to active work.');
+      setMaintenanceButtonsBusy('restart', false);
+      setTimeout(() => hideBanner(), 9000);
+      return;
+    }
+
+    showBanner('Gateway restarting — reconnecting…');
+
+    // If no disconnect occurs, clear stale UI state shortly after.
+    setTimeout(() => {
+      if (state.gateway?.connected) {
+        state.gatewayRestarting = false;
+        setMaintenanceButtonsBusy('restart', false);
+        hideBanner();
+        fetchServerInfo();
+      }
+    }, 15000);
+  } catch (err) {
+    state.gatewayRestarting = false;
+    console.warn('Gateway restart request failed:', err);
+    showBanner('Could not request restart. Check logs and try again.');
+    setMaintenanceButtonsBusy('restart', false);
+    setTimeout(() => hideBanner(), 9000);
+  }
 }
 
 async function runOpenClawUpdate() {
