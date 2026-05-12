@@ -1968,11 +1968,12 @@ async function loadDefaults() {
     
     // Parse TTS config
     const tts = parsed?.messages?.tts || cfg?.messages?.tts || {};
+    const ttsProviders = tts.providers || {};
     state.ttsConfig = {
       auto: tts.auto || (tts.enabled ? "always" : "off"),
       provider: tts.provider || "",
-      openaiKey: tts.openai?.apiKey || "",
-      elevenlabsKey: tts.elevenlabs?.apiKey || "",
+      openaiKey: ttsProviders.openai?.apiKey || tts.openai?.apiKey || "",
+      elevenlabsKey: ttsProviders.elevenlabs?.apiKey || tts.elevenlabs?.apiKey || "",
     };
     // Redacted keys show as __OPENCLAW_REDACTED__ - treat as empty for display but don't overwrite
     if (state.ttsConfig.openaiKey === "__OPENCLAW_REDACTED__") state.ttsConfig.openaiKey = "••••••••";
@@ -8103,7 +8104,7 @@ function updateServerPanel() {
 
   // Update button (only if update available)
   if (latest) {
-    html += '<button class="hud-defaults-apply" onclick="sendControlAction(\'Check for OpenClaw updates. If available, update and restart.\')">update to v' + escapeHtmlChat(latest) + '</button>';
+    html += '<button class="hud-defaults-apply" data-update-action="run" onclick="runOpenClawUpdate()">update to v' + escapeHtmlChat(latest) + '</button>';
   }
 
   html += '<div class="hud-settings-divider"></div>';
@@ -8842,21 +8843,13 @@ function normalizeIdleTimeoutSeconds(raw, fallback = DEFAULT_LLM_IDLE_TIMEOUT_SE
 }
 
 function buildIdleTimeoutOptions(currentSec) {
-  const out = [];
-  const seen = new Set();
-
-  const push = (value, label) => {
-    const sec = normalizeIdleTimeoutSeconds(value, RECOMMENDED_LLM_IDLE_TIMEOUT_SECONDS);
-    if (seen.has(sec)) return;
-    seen.add(sec);
-    out.push({ value: sec, label });
-  };
-
   const normalizedCurrent = normalizeIdleTimeoutSeconds(currentSec);
-  push(normalizedCurrent, `Current (${normalizedCurrent}s)`);
-  push(RECOMMENDED_LLM_IDLE_TIMEOUT_SECONDS, `Recommended (${RECOMMENDED_LLM_IDLE_TIMEOUT_SECONDS}s · max effective)`);
+  const recommended = normalizeIdleTimeoutSeconds(RECOMMENDED_LLM_IDLE_TIMEOUT_SECONDS);
 
-  return out;
+  return [
+    { value: normalizedCurrent, label: `Current (${normalizedCurrent}s)` },
+    { value: recommended, label: `Recommended (${recommended}s)` },
+  ];
 }
 
 const RESET_IDLE_MINUTES_OPTIONS = [60, 120, 240, 480, 720, 1440, 2880, 10080];
@@ -8923,13 +8916,18 @@ function updateDefaultsPanel() {
   function renderIdleTimeoutSelect() {
     const cls = idleTimeoutPending ? ' hud-defaults-pending' : '';
     const options = buildIdleTimeoutOptions(currentIdleTimeout);
+    let selectedSet = false;
     const optionsHtml = options.map(opt => {
-      const selected = Number(opt.value) === Number(currentIdleTimeout) ? ' selected' : '';
+      let selected = '';
+      if (!selectedSet && Number(opt.value) === Number(currentIdleTimeout)) {
+        selected = ' selected';
+        selectedSet = true;
+      }
       return '<option value="' + opt.value + '"' + selected + '>' + opt.label + '</option>';
     }).join('');
 
     return '<div class="hud-defaults-row">' +
-      '<span class="hud-defaults-label">Model idle timeout (60–120s)</span>' +
+      '<span class="hud-defaults-label">Idle timeout</span>' +
       '<select class="hud-defaults-select" data-default-key="llmIdleTimeoutSeconds"' + cls + '>' + optionsHtml + '</select>' +
     '</div>';
   }
@@ -9380,12 +9378,13 @@ async function applyTTSConfig() {
     if ('auto' in pendingTTS) patch.auto = pendingTTS.auto;
     if ('provider' in pendingTTS) patch.provider = pendingTTS.provider;
     
-    // Also save API key if provider is not edge and key is entered
+    // Save API key under schema-supported path: messages.tts.providers.<provider>.apiKey
     const provider = pendingTTS.provider || state.ttsConfig?.provider || 'edge';
     const keyVal = document.getElementById('dash-tts-key')?.value || '';
     if (provider !== 'edge' && keyVal && !keyVal.startsWith('•')) {
-      if (provider === 'openai') patch.openai = { apiKey: keyVal };
-      else if (provider === 'elevenlabs') patch.elevenlabs = { apiKey: keyVal };
+      patch.providers = {
+        [provider]: { apiKey: keyVal }
+      };
     }
     
     const raw = JSON.stringify({ messages: { tts: patch } });
@@ -9394,11 +9393,14 @@ async function applyTTSConfig() {
     // Update local state
     if ('auto' in pendingTTS) state.ttsConfig.auto = pendingTTS.auto;
     if ('provider' in pendingTTS) state.ttsConfig.provider = pendingTTS.provider;
+    if (provider === 'openai' && keyVal && !keyVal.startsWith('•')) state.ttsConfig.openaiKey = keyVal;
+    if (provider === 'elevenlabs' && keyVal && !keyVal.startsWith('•')) state.ttsConfig.elevenlabsKey = keyVal;
     
     for (const k in pendingTTS) delete pendingTTS[k];
     updateTTSApplyBtn();
   } catch (err) {
     console.warn("Failed to apply TTS config:", err);
+  } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'save'; }
   }
 }
@@ -9790,6 +9792,69 @@ async function confirmDisconnect() {
   const ok = await confirmClose('Disconnect?', 'This will unpair your device. You\'ll need to re-enter your gateway URL and token to reconnect.');
   if (!ok) return;
   document.getElementById('dash-disconnect-btn')?.click();
+}
+
+async function runOpenClawUpdate() {
+  if (!state.gateway?.connected) return;
+
+  const latest = state._latestVersion || '';
+  const targetLabel = latest ? `v${latest}` : 'latest';
+  const ok = window.confirm(`Update OpenClaw to ${targetLabel}? This will restart the gateway.`);
+  if (!ok) return;
+
+  const updateBtns = Array.from(document.querySelectorAll('[data-update-action="run"]'));
+  const restoreButtons = () => {
+    updateBtns.forEach((btn) => {
+      btn.disabled = false;
+      const prev = btn.dataset.prevText;
+      if (prev) btn.textContent = prev;
+      delete btn.dataset.prevText;
+    });
+  };
+
+  updateBtns.forEach((btn) => {
+    btn.dataset.prevText = btn.textContent || '';
+    btn.disabled = true;
+    btn.textContent = 'updating…';
+  });
+
+  try {
+    state.gatewayRestarting = true;
+    showBanner(`Starting OpenClaw update (${targetLabel})…`);
+
+    const result = await state.gateway.request('update.run', {
+      note: `Claw Tabs started OpenClaw update (target ${targetLabel}).`,
+      continuationMessage: `After restart, verify OpenClaw version and report whether ${targetLabel} applied successfully.`,
+      restartDelayMs: 0,
+      timeoutMs: 20 * 60 * 1000,
+    });
+
+    const status = result?.result?.status;
+    if (status === 'ok') {
+      showBanner(`Update started (${targetLabel}). Gateway restarting…`);
+      setTimeout(() => {
+        if (state.gateway?.connected) {
+          state.gatewayRestarting = false;
+          hideBanner();
+          restoreButtons();
+          fetchServerInfo();
+        }
+      }, 15000);
+      return;
+    }
+
+    state.gatewayRestarting = false;
+    const reason = result?.result?.reason || 'unknown';
+    showBanner(`Update did not start (${status || 'error'}: ${reason}).`);
+    restoreButtons();
+    setTimeout(() => hideBanner(), 9000);
+  } catch (err) {
+    state.gatewayRestarting = false;
+    console.warn('OpenClaw update request failed:', err);
+    showBanner('Could not start update. Check logs and try again.');
+    restoreButtons();
+    setTimeout(() => hideBanner(), 9000);
+  }
 }
 
 function sendControlAction(message) {
