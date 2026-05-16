@@ -840,6 +840,7 @@ const state = {
   tabDeleteInProgress: false,
   tabCache: {},  // { [sessionKey]: { messages: [...], timestamp: number } }
   tabDrafts: JSON.parse(localStorage.getItem('tabDrafts') || '{}'),
+  tabAttachmentDrafts: {}, // { [sessionKey]: [{...attachment}] } (in-memory only)
   messageQueue: JSON.parse(localStorage.getItem('messageQueue') || '{}'),  // { [sessionKey]: [{ text, images, timestamp }] }
   tabRenameState: {}, // { [sessionKey]: { userText, pending, attempted, inFlight, manual, autoEligible, fallbackTimer } }
   workSummaries: loadStoredWorkSummaries(), // { [sessionKey]: [{ id, ms, at, outcome }] }
@@ -1513,6 +1514,7 @@ async function startChat() {
   updateModelLabel();
   prefetchAllTabs(); // pre-load other tabs in background
   restoreDraft();
+  restoreAttachmentDraft();
   updateComposerPlaceholder();
   renderQueuedMessages();
   // Drain any queued messages from a previous session/page load
@@ -1727,6 +1729,9 @@ function clearLocalConnectionAndReturnToLanding({ showConnectModal = false } = {
   state.onboardingHintShown = false;
   state.pairingRequired = false;
   state.pairingRequestId = "";
+  state.pendingAttachments = [];
+  state.tabAttachmentDrafts = {};
+  renderAttachPreview();
 
   const landing = document.getElementById("landing");
   const app = document.querySelector(".app");
@@ -2792,6 +2797,39 @@ function restoreDraft() {
 function clearDraft(key) {
   delete state.tabDrafts[key || state.sessionKey];
   localStorage.setItem('tabDrafts', JSON.stringify(state.tabDrafts));
+  clearAttachmentDraft(key || state.sessionKey);
+}
+
+function cloneAttachmentDraftList(list) {
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((att) => att && typeof att === 'object')
+    .map((att) => ({ ...att }));
+}
+
+function saveAttachmentDraft(key = state.sessionKey) {
+  if (!key) return;
+  const cloned = cloneAttachmentDraftList(state.pendingAttachments);
+  if (cloned.length > 0) {
+    state.tabAttachmentDrafts[key] = cloned;
+  } else {
+    delete state.tabAttachmentDrafts[key];
+  }
+}
+
+function restoreAttachmentDraft(key = state.sessionKey) {
+  if (!key) {
+    state.pendingAttachments = [];
+    renderAttachPreview();
+    return;
+  }
+  state.pendingAttachments = cloneAttachmentDraftList(state.tabAttachmentDrafts[key] || []);
+  renderAttachPreview();
+}
+
+function clearAttachmentDraft(key = state.sessionKey) {
+  if (!key) return;
+  delete state.tabAttachmentDrafts[key];
 }
 
 function queueMessage(text, attachments) {
@@ -2802,7 +2840,13 @@ function queueMessage(text, attachments) {
   if (state.messageQueue[key].length >= MAX_QUEUE) return; // silently cap
   const entry = { text, timestamp: Date.now() };
   if (attachments && attachments.length > 0) {
-    entry.attachments = attachments.map(a => ({ name: a.name, mimeType: a.mimeType, base64: a.base64, content: a.content }));
+    entry.attachments = attachments.map(a => ({
+      name: a.name,
+      mimeType: a.mimeType,
+      base64: a.base64,
+      content: a.content,
+      attachmentType: a.attachmentType,
+    }));
   }
   state.messageQueue[key].push(entry);
   localStorage.setItem('messageQueue', JSON.stringify(state.messageQueue));
@@ -2957,6 +3001,7 @@ function processQueue() {
 async function switchTab(tab) {
   // Save draft from current tab before switching
   saveDraft();
+  saveAttachmentDraft();
 
   state.streamEl = null;
   ui.typingIndicator.classList.add("oc-hidden");
@@ -2973,6 +3018,7 @@ async function switchTab(tab) {
   renderTabs();
   updateMobileTabLabelInstant(tab);
   restoreDraft();
+  restoreAttachmentDraft();
   updateBarControls();
   updateComposerPlaceholder();
 
@@ -3074,6 +3120,7 @@ async function closeTab(tab, currentKey) {
   if (!ok) return;
   state.tabDeleteInProgress = true;
   resetTabRenameState(tab.key, false);
+  clearDraft(tab.key);
   delete state.tabCache[tab.key];
   clearWorkSummaries(tab.key);
   finishStream(tab.key);
@@ -3095,6 +3142,8 @@ async function closeTab(tab, currentKey) {
     state.messages = [];
     ui.messagesContainer.innerHTML = "";
     await loadChatHistory();
+    restoreDraft();
+    restoreAttachmentDraft();
     updateComposerPlaceholder();
   }
   state.tabDeleteInProgress = false;
@@ -3106,6 +3155,8 @@ async function closeTab(tab, currentKey) {
 
 async function createNewTab() {
   if (!state.gateway?.connected) return;
+  saveDraft();
+  saveAttachmentDraft();
   // Collect ALL known tab numbers: visible tabs + gateway sessions
   const nums = state.tabSessions
     .map(t => { const m = t.key.match(/^tab-(\d+)$/); return m ? parseInt(m[1]) : NaN; })
@@ -3143,6 +3194,8 @@ async function createNewTab() {
     localStorage.setItem("sessionKey", sessionKey);
     state.messages = [];
     ui.messagesContainer.innerHTML = "";
+    restoreDraft();
+    restoreAttachmentDraft();
     showLoading("Loading…");
     updateComposerPlaceholder();
     await renderTabs();
@@ -3256,6 +3309,8 @@ async function updateContextMeter() {
         state.messages = [];
         ui.messagesContainer.innerHTML = "";
         await loadChatHistory();
+        restoreDraft();
+        restoreAttachmentDraft();
         updateComposerPlaceholder();
       }
       await renderTabs();
@@ -6894,8 +6949,8 @@ async function sendMessage(text, opts = {}) {
       fullMessage = label;
     }
     state.pendingAttachments = [];
-    ui.attachPreview.classList.add("oc-hidden");
-    ui.attachPreview.innerHTML = "";
+    clearAttachmentDraft(state.sessionKey);
+    renderAttachPreview();
   }
 
   const userTimestamp = Date.now();
@@ -7135,6 +7190,8 @@ function renderAttachPreview() {
   ui.attachPreview.innerHTML = "";
   if (state.pendingAttachments.length === 0) {
     ui.attachPreview.classList.add("oc-hidden");
+    saveAttachmentDraft();
+    updateSendButton();
     return;
   }
   ui.attachPreview.classList.remove("oc-hidden");
@@ -7180,6 +7237,7 @@ function renderAttachPreview() {
     ui.attachPreview.appendChild(chip);
   }
 
+  saveAttachmentDraft();
   updateSendButton();
 }
 
@@ -7418,8 +7476,7 @@ function handleSendOrQueue() {
     // Clear attachments from UI
     if (state.pendingAttachments.length > 0) {
       state.pendingAttachments = [];
-      ui.attachPreview.classList.add('oc-hidden');
-      ui.attachPreview.innerHTML = '';
+      renderAttachPreview();
     }
     clearDraft(state.sessionKey);
     return;
