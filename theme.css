@@ -3811,7 +3811,7 @@ body.text-large .openclaw-tool-item { font-size: 12px; }
   flex-shrink: 0;
   align-items: flex-start;
 }
-.oc-queue-copy, .oc-queue-remove {
+.oc-queue-edit, .oc-queue-copy, .oc-queue-remove {
   background: none;
   border: none;
   color: var(--text-faint);
@@ -3828,6 +3828,7 @@ body.text-large .openclaw-tool-item { font-size: 12px; }
   align-items: center;
   justify-content: center;
 }
+.oc-queue-edit:hover,
 .oc-queue-copy:hover { opacity: 1; background: rgba(255,255,255,0.06); }
 .oc-queue-remove:hover { color: #ef4444; background: rgba(239,68,68,0.1); opacity: 1; }
 @keyframes queueSlideIn {

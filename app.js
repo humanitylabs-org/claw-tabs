@@ -879,7 +879,7 @@ const state = {
   // Attachments
   pendingAttachments: [],
   sending: false,
-  processingQueue: false,
+  processingQueueBySession: {},
 
   // Auto-scroll behavior: keep following output only while user is at bottom
   autoScrollPinned: true,
@@ -2832,13 +2832,23 @@ function clearAttachmentDraft(key = state.sessionKey) {
   delete state.tabAttachmentDrafts[key];
 }
 
+function persistMessageQueue() {
+  localStorage.setItem('messageQueue', JSON.stringify(state.messageQueue));
+}
+
 function queueMessage(text, attachments) {
   const key = state.sessionKey;
-  if (!key) return;
+  if (!key) return false;
   const MAX_QUEUE = 5;
   if (!state.messageQueue[key]) state.messageQueue[key] = [];
-  if (state.messageQueue[key].length >= MAX_QUEUE) return; // silently cap
-  const entry = { text, timestamp: Date.now() };
+  if (state.messageQueue[key].length >= MAX_QUEUE) {
+    showBanner(`Queue is full (${MAX_QUEUE}). Remove one queued message first.`);
+    setTimeout(() => {
+      if (!hasActiveRunInSession(state.sessionKey)) hideBanner();
+    }, 1800);
+    return false;
+  }
+  const entry = { id: generateId(), text, timestamp: Date.now() };
   if (attachments && attachments.length > 0) {
     entry.attachments = attachments.map(a => ({
       name: a.name,
@@ -2849,15 +2859,50 @@ function queueMessage(text, attachments) {
     }));
   }
   state.messageQueue[key].push(entry);
-  localStorage.setItem('messageQueue', JSON.stringify(state.messageQueue));
+  persistMessageQueue();
   renderQueuedMessages();
+  return true;
 }
 
 function removeQueuedMessage(key, index) {
   if (!state.messageQueue[key]) return;
+  if (index < 0 || index >= state.messageQueue[key].length) return;
   state.messageQueue[key].splice(index, 1);
   if (state.messageQueue[key].length === 0) delete state.messageQueue[key];
-  localStorage.setItem('messageQueue', JSON.stringify(state.messageQueue));
+  persistMessageQueue();
+  renderQueuedMessages();
+}
+
+function editQueuedMessage(key, index) {
+  const queue = state.messageQueue[key];
+  if (!queue) return;
+  if (index < 0 || index >= queue.length) return;
+
+  const next = queue[index] || {};
+  const nextText = str(next.text);
+  const nextAttachments = cloneAttachmentDraftList(next.attachments || []);
+
+  const currentText = str(ui.messageInput?.value).trim();
+  const hasCurrentDraft = !!currentText || state.pendingAttachments.length > 0;
+  const nextTextTrimmed = nextText.trim();
+  const sameText = currentText === nextTextTrimmed;
+  const sameAttachments = JSON.stringify(state.pendingAttachments) === JSON.stringify(nextAttachments);
+
+  if (hasCurrentDraft && (!sameText || !sameAttachments)) {
+    const ok = window.confirm("Replace current draft with this queued message for editing?");
+    if (!ok) return;
+  }
+
+  queue.splice(index, 1);
+  if (queue.length === 0) delete state.messageQueue[key];
+  persistMessageQueue();
+
+  ui.messageInput.value = nextText || "";
+  state.pendingAttachments = nextAttachments;
+  renderAttachPreview();
+  ui.messageInput.dispatchEvent(new Event('input'));
+  ui.messageInput.focus();
+
   renderQueuedMessages();
 }
 
@@ -2890,7 +2935,7 @@ function renderQueuedMessages() {
   clearBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     delete state.messageQueue[key];
-    localStorage.setItem('messageQueue', JSON.stringify(state.messageQueue));
+    persistMessageQueue();
     renderQueuedMessages();
   });
   actions.appendChild(clearBtn);
@@ -2921,6 +2966,16 @@ function renderQueuedMessages() {
     `;
     const itemActions = document.createElement('span');
     itemActions.className = 'oc-queue-item-actions';
+
+    const editBtn = document.createElement('button');
+    editBtn.className = 'oc-queue-edit';
+    editBtn.textContent = '✎';
+    editBtn.title = 'Edit before sending';
+    editBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      editQueuedMessage(key, i);
+    });
+    itemActions.appendChild(editBtn);
 
     const copyBtn = document.createElement('button');
     copyBtn.className = 'oc-queue-copy';
@@ -2959,41 +3014,66 @@ function renderQueuedMessages() {
   modelBar.parentNode.insertBefore(bar, modelBar);
 }
 
-function processQueue() {
-  // Lock: only one drain loop at a time
-  if (state.processingQueue) return;
-  const key = state.sessionKey;
+function processQueue(sessionKey = state.sessionKey) {
+  const key = sessionKey || state.sessionKey;
+  if (!key) return;
+
+  // Composer-backed send pipeline is currently active-tab only.
+  if (key !== state.sessionKey) return;
+
+  // Lock: one drain loop per session key
+  if (state.processingQueueBySession[key]) return;
+
   const queue = state.messageQueue[key];
   if (!queue || queue.length === 0) return;
+
   // Don't process if still streaming, transcript indicates an in-flight run,
   // or we're already sending.
-  if (state.streams.has(key) || state.historyInFlight[key] || state.sending) {
+  if (hasActiveRunInSession(key) || state.sending) {
     // Retry after current send/stream completes
-    setTimeout(() => processQueue(), 800);
+    setTimeout(() => processQueue(key), 800);
     return;
   }
+
   // Don't process if gateway is disconnected
   if (!state.gateway?.connected) return;
 
-  state.processingQueue = true;
+  const next = queue[0];
+  if (!next) return;
+  const nextId = str(next.id);
 
-  // Pop item and flush localStorage BEFORE sending
-  const next = queue.shift();
-  if (queue.length === 0) delete state.messageQueue[key];
-  localStorage.setItem('messageQueue', JSON.stringify(state.messageQueue));
-  renderQueuedMessages();
+  state.processingQueueBySession[key] = true;
 
-  // Restore attachments if any
-  if (next.attachments && next.attachments.length > 0) {
-    state.pendingAttachments = next.attachments;
-  }
-  // Send and wait for completion before unlocking
-  sendMessage(next.text || '').finally(() => {
-    state.processingQueue = false;
+  const queuedAttachments = cloneAttachmentDraftList(next.attachments || []);
+
+  sendMessage(next.text || '', {
+    attachments: queuedAttachments,
+    preserveComposer: true,
+  }).then((sent) => {
+    if (!sent) return;
+
+    const latestQueue = state.messageQueue[key];
+    if (latestQueue && latestQueue.length > 0) {
+      let removed = false;
+      if (nextId) {
+        const idx = latestQueue.findIndex((item) => str(item?.id) === nextId);
+        if (idx >= 0) {
+          latestQueue.splice(idx, 1);
+          removed = true;
+        }
+      }
+      if (!removed) latestQueue.shift();
+      if (latestQueue.length === 0) delete state.messageQueue[key];
+      persistMessageQueue();
+      renderQueuedMessages();
+    }
+  }).finally(() => {
+    delete state.processingQueueBySession[key];
+
     // Drain next queued message if any remain
     const remaining = state.messageQueue[key];
     if (remaining && remaining.length > 0) {
-      setTimeout(() => processQueue(), 500);
+      setTimeout(() => processQueue(key), 500);
     }
   });
 }
@@ -3040,7 +3120,7 @@ async function switchTab(tab) {
 
   // Drain any queued messages if no active stream on this tab
   if (!state.streams.has(tab.key) && !state.sending) {
-    setTimeout(() => processQueue(), 300);
+    setTimeout(() => processQueue(tab.key), 300);
   }
 
   // Context meter in background (don't block UI)
@@ -3121,6 +3201,9 @@ async function closeTab(tab, currentKey) {
   state.tabDeleteInProgress = true;
   resetTabRenameState(tab.key, false);
   clearDraft(tab.key);
+  delete state.messageQueue[tab.key];
+  delete state.processingQueueBySession[tab.key];
+  persistMessageQueue();
   delete state.tabCache[tab.key];
   clearWorkSummaries(tab.key);
   finishStream(tab.key);
@@ -4803,7 +4886,7 @@ function stopHistoryInFlightPoll(sessionKey) {
 
   // When transcript polling settles for the active tab, try draining queue.
   if (endedSession && endedSession === state.sessionKey) {
-    setTimeout(() => processQueue(), 50);
+    setTimeout(() => processQueue(endedSession), 50);
   }
 }
 
@@ -6437,7 +6520,7 @@ function finishStream(sessionKey) {
     renderTypingLabel(STATUS_WORKING, sk);
   }
   // Always try to drain queue for the finished session (even if user switched tabs)
-  setTimeout(() => processQueue(), 500);
+  setTimeout(() => processQueue(sk), 500);
 }
 
 function restoreStreamUI() {
@@ -6799,7 +6882,7 @@ function handleChatEvent(payload) {
       hideBanner();
       loadChatHistory();
       // Drain queue — stream may have been cleaned up before final arrived
-      setTimeout(() => processQueue(), 500);
+      setTimeout(() => processQueue(eventSessionKey), 500);
     } else {
       // Non-active tab got a final without a stream — mark unread (unless heartbeat/silent)
       const text = extractDeltaText(payload.message);
@@ -6910,12 +6993,22 @@ function handleChatEvent(payload) {
 // ─── Send Message ────────────────────────────────────────────────────
 
 async function sendMessage(text, opts = {}) {
+  const targetSessionKey = str(opts.sessionKey, state.sessionKey);
   const hideUserBubble = !!opts.hideUserBubble;
   const skipAutoRename = !!opts.skipAutoRename;
-  const hasAttachments = state.pendingAttachments.length > 0;
-  if (!text.trim() && !hasAttachments) return;
-  if (state.sending) return;
-  if (!state.gateway?.connected) return;
+  const preserveComposer = !!opts.preserveComposer;
+  const hasAttachmentOverride = Array.isArray(opts.attachments);
+  const selectedAttachments = hasAttachmentOverride
+    ? cloneAttachmentDraftList(opts.attachments)
+    : cloneAttachmentDraftList(state.pendingAttachments);
+  const hasAttachments = selectedAttachments.length > 0;
+
+  if (!targetSessionKey) return false;
+  if (!text.trim() && !hasAttachments) return false;
+  if (state.sending) return false;
+  if (!state.gateway?.connected) return false;
+
+  const isActiveTarget = targetSessionKey === state.sessionKey;
 
   // Request notification permission on first user interaction
   if ("Notification" in window && Notification.permission === "default") {
@@ -6923,17 +7016,21 @@ async function sendMessage(text, opts = {}) {
   }
 
   state.sending = true;
-  ui.messageInput.value = "";
-  autoResize();
+  if (isActiveTarget && !preserveComposer) {
+    ui.messageInput.value = "";
+    autoResize();
+  }
 
   let fullMessage = text;
   const displayText = text;
   const userImages = [];
   const userAudios = [];
   const gatewayAttachments = [];
+  let sentOk = false;
+  let sendError = null;
 
-  if (state.pendingAttachments.length > 0) {
-    for (const att of state.pendingAttachments) {
+  if (selectedAttachments.length > 0) {
+    for (const att of selectedAttachments) {
       if (att.base64 && att.mimeType) {
         const attachmentType = att.attachmentType || (att.mimeType.startsWith("audio/") ? "audio" : "image");
         gatewayAttachments.push({ type: attachmentType, mimeType: att.mimeType, content: att.base64 });
@@ -6945,18 +7042,20 @@ async function sendMessage(text, opts = {}) {
       }
     }
     if (!text.trim()) {
-      const label = `📎 ${state.pendingAttachments.map(a => a.name).join(", ")}`;
+      const label = `📎 ${selectedAttachments.map(a => a.name).join(", ")}`;
       fullMessage = label;
     }
-    state.pendingAttachments = [];
-    clearAttachmentDraft(state.sessionKey);
-    renderAttachPreview();
+    if (!hasAttachmentOverride && isActiveTarget) {
+      state.pendingAttachments = [];
+      clearAttachmentDraft(state.sessionKey);
+      renderAttachPreview();
+    }
   }
 
   const userTimestamp = Date.now();
   const userTextForCache = displayText || fullMessage;
 
-  if (!hideUserBubble) {
+  if (!hideUserBubble && isActiveTarget) {
     state.messages.push({
       role: "user",
       text: userTextForCache,
@@ -6965,18 +7064,18 @@ async function sendMessage(text, opts = {}) {
       timestamp: userTimestamp,
     });
     if (userImages.length > 0 || userAudios.length > 0) {
-      rememberPendingInlineMedia(state.sessionKey, userTextForCache, userTimestamp, userImages, userAudios);
+      rememberPendingInlineMedia(targetSessionKey, userTextForCache, userTimestamp, userImages, userAudios);
     }
     renderMessages();
   }
 
   // Auto-rename "Untitled" tabs based on first message
   if (!skipAutoRename) {
-    void autoRenameTab(state.sessionKey, displayText || fullMessage);
+    void autoRenameTab(targetSessionKey, displayText || fullMessage);
   }
 
   const runId = generateId();
-  const sendSessionKey = state.sessionKey;
+  const sendSessionKey = targetSessionKey;
   const startedAtMs = Date.now();
 
   const ss = {
@@ -6999,10 +7098,12 @@ async function sendMessage(text, opts = {}) {
   state.runToSession.set(runId, sendSessionKey);
   setWorkingSince(sendSessionKey, startedAtMs);
 
-  setSendButtonStopMode(true);
-  ui.typingIndicator.classList.remove("oc-hidden");
-  renderTypingLabel(STATUS_WORKING, sendSessionKey);
-  scrollToBottom(true);
+  if (isActiveTarget) {
+    setSendButtonStopMode(true);
+    ui.typingIndicator.classList.remove("oc-hidden");
+    renderTypingLabel(STATUS_WORKING, sendSessionKey);
+    scrollToBottom(true);
+  }
 
   ss.compactTimer = setTimeout(() => {
     const current = state.streams.get(sendSessionKey);
@@ -7025,17 +7126,26 @@ async function sendMessage(text, opts = {}) {
     };
     if (gatewayAttachments.length > 0) sendParams.attachments = gatewayAttachments;
     await state.gateway.request("chat.send", sendParams);
+    sentOk = true;
   } catch (err) {
+    sendError = err;
     if (ss.compactTimer) clearTimeout(ss.compactTimer);
-    state.messages.push({ role: "assistant", text: `Error: ${err}`, images: [], timestamp: Date.now() });
+    if (isActiveTarget) {
+      state.messages.push({ role: "assistant", text: `Error: ${err}`, images: [], timestamp: Date.now() });
+    }
     state.streams.delete(sendSessionKey);
     state.runToSession.delete(runId);
     if (state.streamAssembler) state.streamAssembler.drop(runId);
-    setSendButtonStopMode(false);
-    renderMessages();
+    if (isActiveTarget) {
+      setSendButtonStopMode(false);
+      renderMessages();
+    }
   } finally {
     state.sending = false;
   }
+
+  if (sendError && opts.throwOnError) throw sendError;
+  return sentOk;
 }
 
 async function abortMessage() {
@@ -7435,9 +7545,11 @@ function autoResize() {
 
 function handleSendOrQueue() {
   const text = ui.messageInput.value.trim();
+  const hasDraftContent = !!text || state.pendingAttachments.length > 0;
   const ss = state.streams.get(state.sessionKey);
   // Only treat as "streaming" if it's a user-initiated stream (not background/startup)
   let isStreaming = !!ss && !ss.background;
+  const isBusy = hasActiveRunInSession(state.sessionKey);
 
   // Safety: if stream exists but is stale, clean it up and show a clear timeout notice.
   if (isStreaming) {
@@ -7451,8 +7563,9 @@ function handleSendOrQueue() {
     }
   }
 
-  // If streaming and input is empty, abort (stop button behavior)
-  if (ui.sendBtn.classList.contains("stop-mode") && !text) {
+  // If actively streaming and composer is empty, stop current run.
+  // If composer has text/attachments, this same button becomes "Add to queue".
+  if (ui.sendBtn.classList.contains("stop-mode") && !hasDraftContent) {
     if (!isStreaming) {
       setSendButtonStopMode(false);
       return;
@@ -7466,11 +7579,12 @@ function handleSendOrQueue() {
     return;
   }
 
-  if (!text && state.pendingAttachments.length === 0) return;
+  if (!hasDraftContent) return;
 
-  // If agent is currently streaming, queue the message (with any attachments)
-  if (isStreaming && (text || state.pendingAttachments.length > 0)) {
-    queueMessage(text, state.pendingAttachments.length > 0 ? [...state.pendingAttachments] : null);
+  // If this tab is currently busy, queue the message (with any attachments).
+  if (isStreaming || isBusy) {
+    const queued = queueMessage(text, state.pendingAttachments.length > 0 ? cloneAttachmentDraftList(state.pendingAttachments) : null);
+    if (!queued) return;
     ui.messageInput.value = '';
     ui.messageInput.dispatchEvent(new Event('input'));
     // Clear attachments from UI
@@ -7626,18 +7740,22 @@ function setSendButtonStopMode(isStop) {
   }
 }
 
-// When streaming: show send arrow if input has text (queue mode), stop square if empty
+// While a run is active: show "Add to Q" when composer has content, stop square when empty.
 function updateStopSendIcon() {
   const btn = ui.sendBtn;
   if (!btn || !btn.classList.contains('stop-mode')) return;
-  const hasText = ui.messageInput.value.trim().length > 0;
+  const hasComposerContent = ui.messageInput.value.trim().length > 0 || state.pendingAttachments.length > 0;
   btn.classList.remove('oc-opacity-low');
-  if (hasText) {
+  if (hasComposerContent) {
     btn.classList.add('queue-mode');
-    btn.innerHTML = SEND_ICON;
+    btn.innerHTML = '<span class="oc-queue-label">Add to Q</span>';
+    btn.setAttribute('aria-label', 'Add to queue');
+    btn.title = 'Add to queue';
   } else {
     btn.classList.remove('queue-mode');
     btn.innerHTML = STOP_ICON;
+    btn.setAttribute('aria-label', 'Stop current response');
+    btn.title = 'Stop current response';
   }
 }
 
