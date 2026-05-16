@@ -62,6 +62,13 @@ const INLINE_MEDIA_PENDING_KEY = "inlineMediaPending.v1";
 const INLINE_MEDIA_MAX_ITEMS = 32;
 const INLINE_MEDIA_MAX_CHARS = 3_500_000;
 const INLINE_MEDIA_MATCH_WINDOW_MS = 10 * 60 * 1000;
+const THEME_MODE_DARK = "dark";
+const THEME_MODE_LIGHT = "light";
+const THEME_MODE_WALLPAPER = "wallpaper";
+const THEME_MODES = [THEME_MODE_DARK, THEME_MODE_LIGHT, THEME_MODE_WALLPAPER];
+const WALLPAPER_STORAGE_KEY = "clawtabs.wallpaper.v1";
+const WALLPAPER_MAX_DIMENSION = 1920;
+const WALLPAPER_JPEG_QUALITY = 0.82;
 
 function loadInlineMediaStore(key) {
   try {
@@ -9406,8 +9413,10 @@ async function applyTTSConfig() {
 }
 
 function saveDashSettings() {
+  const currentThemeMode = getCurrentThemeMode();
   const settings = {
-    darkMode: !document.documentElement.getAttribute('data-theme'),
+    darkMode: currentThemeMode !== THEME_MODE_LIGHT,
+    themeMode: currentThemeMode,
     voiceInput: document.getElementById('dash-stt-toggle')?.checked || false,
     openaiKey: document.getElementById('dash-openai-key')?.value || '',
   };
@@ -9459,29 +9468,179 @@ function setTextSize(size) {
   localStorage.setItem('dashSettings', JSON.stringify(settings));
 }
 
-function setTheme(theme) {
-  if (theme === 'light') {
-    document.documentElement.setAttribute('data-theme', 'light');
-  } else {
-    document.documentElement.removeAttribute('data-theme');
+function readDashSettings() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem('dashSettings') || '{}');
+    return (parsed && typeof parsed === 'object') ? parsed : {};
+  } catch {
+    return {};
   }
-  document.getElementById('dash-theme-dark')?.classList.toggle('active', theme !== 'light');
-  document.getElementById('dash-theme-light')?.classList.toggle('active', theme === 'light');
-  const settings = JSON.parse(localStorage.getItem('dashSettings') || '{}');
-  settings.darkMode = theme !== 'light';
-  localStorage.setItem('dashSettings', JSON.stringify(settings));
+}
+
+function normalizeThemeMode(mode) {
+  return THEME_MODES.includes(mode) ? mode : THEME_MODE_DARK;
+}
+
+function escapeCssUrl(value) {
+  return String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function getStoredWallpaper() {
+  try {
+    return localStorage.getItem(WALLPAPER_STORAGE_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+function setStoredWallpaper(dataUrl) {
+  try {
+    if (dataUrl) localStorage.setItem(WALLPAPER_STORAGE_KEY, dataUrl);
+    else localStorage.removeItem(WALLPAPER_STORAGE_KEY);
+    return true;
+  } catch (err) {
+    console.warn('Failed to save wallpaper:', err);
+    alert('Could not save wallpaper locally. Try a smaller image.');
+    return false;
+  }
+}
+
+function setWallpaperCss(dataUrl) {
+  if (dataUrl) {
+    document.body.style.setProperty('--wallpaper-image', `url("${escapeCssUrl(dataUrl)}")`);
+  } else {
+    document.body.style.removeProperty('--wallpaper-image');
+  }
+}
+
+function getCurrentThemeMode() {
+  const mode = document.body?.dataset?.themeMode;
+  if (THEME_MODES.includes(mode)) return mode;
+  return document.documentElement.getAttribute('data-theme') === 'light'
+    ? THEME_MODE_LIGHT
+    : THEME_MODE_DARK;
+}
+
+function themeModeFromSettings(settings = {}) {
+  if (THEME_MODES.includes(settings.themeMode)) return settings.themeMode;
+  return settings.darkMode === false ? THEME_MODE_LIGHT : THEME_MODE_DARK;
+}
+
+function updateThemeControls(mode, hasWallpaper) {
+  const themeBtn = document.getElementById('hud-theme-toggle');
+  if (themeBtn) {
+    themeBtn.dataset.themeMode = mode;
+    if (mode === THEME_MODE_WALLPAPER) themeBtn.title = 'Theme: wallpaper (click to switch)';
+    else if (mode === THEME_MODE_LIGHT) themeBtn.title = 'Theme: light (click to switch)';
+    else themeBtn.title = 'Theme: dark (click to switch)';
+  }
+
+  const showWallpaperControls = mode === THEME_MODE_WALLPAPER;
+  const uploadBtn = document.getElementById('hud-wallpaper-upload');
+  if (uploadBtn) {
+    uploadBtn.classList.toggle('active', showWallpaperControls);
+    uploadBtn.classList.toggle('hidden', !showWallpaperControls);
+  }
+
+  const clearBtn = document.getElementById('hud-wallpaper-clear');
+  if (clearBtn) {
+    clearBtn.classList.toggle('hidden', !showWallpaperControls);
+    clearBtn.disabled = !hasWallpaper;
+    clearBtn.title = hasWallpaper ? 'Remove wallpaper' : 'No wallpaper to remove';
+  }
+}
+
+function setThemeMode(themeMode, { persist = true } = {}) {
+  const mode = normalizeThemeMode(themeMode);
+  if (mode === THEME_MODE_LIGHT) document.documentElement.setAttribute('data-theme', 'light');
+  else document.documentElement.removeAttribute('data-theme');
+
+  const wallpaper = getStoredWallpaper();
+  const hasWallpaper = !!wallpaper;
+  const wallpaperActive = mode === THEME_MODE_WALLPAPER && hasWallpaper;
+
+  document.body.dataset.themeMode = mode;
+  document.body.classList.toggle('theme-wallpaper', wallpaperActive);
+  setWallpaperCss(wallpaperActive ? wallpaper : '');
+  updateThemeControls(mode, hasWallpaper);
+
+  if (persist) {
+    const settings = readDashSettings();
+    settings.darkMode = mode !== THEME_MODE_LIGHT;
+    settings.themeMode = mode;
+    localStorage.setItem('dashSettings', JSON.stringify(settings));
+  }
+}
+
+function cycleThemeMode() {
+  const current = getCurrentThemeMode();
+  const idx = THEME_MODES.indexOf(current);
+  const next = THEME_MODES[(idx + 1) % THEME_MODES.length];
+  setThemeMode(next);
+}
+
+async function downscaleWallpaperFile(file) {
+  const bitmap = await createImageBitmap(file);
+  const width = bitmap.width || 1;
+  const height = bitmap.height || 1;
+  const longest = Math.max(width, height);
+  const scale = longest > WALLPAPER_MAX_DIMENSION ? WALLPAPER_MAX_DIMENSION / longest : 1;
+  const targetWidth = Math.max(1, Math.round(width * scale));
+  const targetHeight = Math.max(1, Math.round(height * scale));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
+  const ctx = canvas.getContext('2d', { alpha: false });
+  if (!ctx) throw new Error('Canvas unavailable');
+  ctx.drawImage(bitmap, 0, 0, targetWidth, targetHeight);
+
+  const mime = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+  const quality = mime === 'image/jpeg' ? WALLPAPER_JPEG_QUALITY : undefined;
+  const dataUrl = canvas.toDataURL(mime, quality);
+  bitmap.close?.();
+  return dataUrl;
+}
+
+async function onWallpaperFileChange(event) {
+  const input = event?.target;
+  const file = input?.files?.[0];
+  if (!file) return;
+  if (!file.type?.startsWith('image/')) {
+    alert('Please choose an image file.');
+    if (input) input.value = '';
+    return;
+  }
+  try {
+    const dataUrl = await downscaleWallpaperFile(file);
+    if (!setStoredWallpaper(dataUrl)) return;
+    setThemeMode(THEME_MODE_WALLPAPER);
+  } catch (err) {
+    console.warn('Wallpaper upload failed:', err);
+    alert('Could not process that image. Try a different file.');
+  } finally {
+    if (input) input.value = '';
+  }
+}
+
+function openWallpaperPicker() {
+  const input = document.getElementById('wallpaper-input');
+  if (!input) return;
+  input.click();
+}
+
+function clearWallpaper() {
+  if (!setStoredWallpaper('')) return;
+  setThemeMode(getCurrentThemeMode());
+}
+
+function setTheme(theme) {
+  // Backward compatibility for existing callers.
+  setThemeMode(theme === THEME_MODE_LIGHT ? THEME_MODE_LIGHT : THEME_MODE_DARK);
 }
 
 function applyDashSettings(settings) {
-  if (settings.darkMode === false) {
-    document.documentElement.setAttribute('data-theme', 'light');
-    document.getElementById('dash-theme-dark')?.classList.remove('active');
-    document.getElementById('dash-theme-light')?.classList.add('active');
-  } else {
-    document.documentElement.removeAttribute('data-theme');
-    document.getElementById('dash-theme-dark')?.classList.add('active');
-    document.getElementById('dash-theme-light')?.classList.remove('active');
-  }
+  setThemeMode(themeModeFromSettings(settings || {}), { persist: false });
   // Restore text size
   if (settings.textSize) {
     setTextSize(settings.textSize);
@@ -10105,6 +10264,7 @@ function closeDashboard() {
     saveDashSettings();
   });
   document.getElementById('dash-openai-key')?.addEventListener('change', saveDashSettings);
+  document.getElementById('wallpaper-input')?.addEventListener('change', onWallpaperFileChange);
   
   // TTS mode chips
   document.querySelectorAll('#dash-tts-modes .hud-chip').forEach(chip => {
