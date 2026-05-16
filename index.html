@@ -895,9 +895,16 @@
     .openclaw-msg-assistant ul, .openclaw-msg-assistant ol {
       margin: 4px 0;
       padding-left: 0.35em;
-      list-style-position: inside;
+      list-style: none;
     }
     .openclaw-msg-assistant li { margin-bottom: 1px; line-height: 1.5; }
+    .openclaw-msg-assistant .oc-list-prefix {
+      display: inline;
+      font-variant-numeric: tabular-nums;
+      white-space: pre;
+      -webkit-user-select: text;
+      user-select: text;
+    }
     .openclaw-msg-assistant blockquote {
       border-left: 2px solid var(--interactive-accent);
       padding-left: 10px;

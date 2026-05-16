@@ -5352,6 +5352,7 @@ function appendAssistantTextContent(bubble, displayText, msg) {
     textDiv.innerHTML = renderGenericStatusHtml(displayText);
   } else {
     textDiv.innerHTML = formatMarkdown(displayText);
+    makeListMarkersSelectable(textDiv);
   }
   bubble.appendChild(textDiv);
 }
@@ -5658,6 +5659,48 @@ function formatMarkdown(text) {
   html = html.replace(/<br>\s*<\/ol>/g, '</ol>');
 
   return html;
+}
+
+function makeListMarkersSelectable(root) {
+  if (!root || typeof root.querySelectorAll !== 'function') return;
+
+  const lists = root.querySelectorAll('ul, ol');
+  for (const list of lists) {
+    const isOrdered = list.tagName === 'OL';
+    let counter = Number.parseInt(list.getAttribute('start') || '1', 10);
+    if (!Number.isFinite(counter)) counter = 1;
+
+    const items = Array.from(list.children).filter((el) => el.tagName === 'LI');
+    for (const li of items) {
+      const first = li.firstElementChild;
+      if (first && first.classList.contains('oc-list-prefix')) first.remove();
+      if (first && first.tagName === 'P') {
+        const firstInP = first.firstElementChild;
+        if (firstInP && firstInP.classList.contains('oc-list-prefix')) firstInP.remove();
+      }
+
+      let markerText = '• ';
+      if (isOrdered) {
+        const valueAttr = li.getAttribute('value');
+        if (valueAttr !== null && valueAttr !== '') {
+          const parsed = Number.parseInt(valueAttr, 10);
+          if (Number.isFinite(parsed)) counter = parsed;
+        }
+        markerText = `${counter}. `;
+        counter += 1;
+      }
+
+      const prefix = document.createElement('span');
+      prefix.className = 'oc-list-prefix';
+      prefix.textContent = markerText;
+
+      if (li.firstElementChild && li.firstElementChild.tagName === 'P') {
+        li.firstElementChild.prepend(prefix);
+      } else {
+        li.prepend(prefix);
+      }
+    }
+  }
 }
 
 function escapeHtmlChat(text) {
@@ -6387,6 +6430,7 @@ function updateStreamBubble() {
   const textDiv = document.createElement("div");
   textDiv.className = "openclaw-msg-text";
   textDiv.innerHTML = formatMarkdown(visibleText);
+  makeListMarkersSelectable(textDiv);
   state.streamEl.appendChild(textDiv);
   if (shouldStick) scrollToBottom(true);
 }
@@ -7646,6 +7690,7 @@ ui.tabBar.addEventListener("wheel", (e) => {
         const textDiv = document.createElement("div");
         textDiv.className = "openclaw-msg-text";
         textDiv.innerHTML = formatMarkdown(msg.text.slice(0, 300));
+        makeListMarkersSelectable(textDiv);
         bubble.appendChild(textDiv);
         pane.appendChild(bubble);
       }
@@ -8268,6 +8313,7 @@ async function viewAgentFile(filename, label) {
     if (content) {
       const contentDiv = document.createElement('div');
       contentDiv.innerHTML = formatMarkdown(content);
+      makeListMarkersSelectable(contentDiv);
       body.appendChild(contentDiv);
     } else {
       const emptyDiv = document.createElement('p');
