@@ -738,7 +738,7 @@
 
 .hud-bottom-utility {
   display: flex;
-  justify-content: flex-end;
+  justify-content: flex-start;
   align-items: center;
   gap: 4px;
   padding: 6px 10px;
@@ -746,12 +746,32 @@
   border-top: 1px solid rgba(255,255,255,0.06);
 }
 
-.hud-bottom-utility .hud-theme-toggle:first-child {
-  margin-left: auto;
+.hud-release-badge {
+  margin-right: auto;
+  display: inline-flex;
+  align-items: center;
+  max-width: 140px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.05);
+  color: var(--text-faint);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: default;
 }
 
 [data-theme="light"] .hud-bottom-utility {
   border-top-color: rgba(0,0,0,0.06);
+}
+
+[data-theme="light"] .hud-release-badge {
+  border-color: rgba(0,0,0,0.14);
+  background: rgba(0,0,0,0.03);
 }
 
 /* ── Agent Card ───────────────────────────────────────── */

@@ -52,6 +52,61 @@ async function loadAutoBootstrapConnection() {
   }
 }
 
+function formatReleaseBadgeText(release) {
+  if (!release || typeof release !== "object") return "ClawTabs";
+  const version = str(release.version).trim();
+  const commit = str(release.commit).trim();
+  if (version) return `ClawTabs ${version}`;
+  if (commit) return `ClawTabs ${commit.slice(0, 7)}`;
+  return "ClawTabs";
+}
+
+function updateReleaseBadge() {
+  const badge = document.getElementById("hud-release-badge");
+  if (!badge) return;
+
+  const release = state.releaseInfo || null;
+  badge.textContent = formatReleaseBadgeText(release);
+
+  if (!release) {
+    badge.title = "Installed Claw Tabs build";
+    return;
+  }
+
+  const bits = [];
+  const version = str(release.version).trim();
+  const date = str(release.releaseDate).trim();
+  const commit = str(release.commit).trim();
+  if (version) bits.push(`version: ${version}`);
+  if (date) bits.push(`date: ${date}`);
+  if (commit) bits.push(`commit: ${commit}`);
+  badge.title = bits.length > 0 ? bits.join("\n") : "Installed Claw Tabs build";
+}
+
+async function loadReleaseBadge() {
+  try {
+    const response = await fetch(withBasePath("/release.json"), {
+      method: "GET",
+      cache: "no-store",
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+    });
+
+    if (!response.ok) {
+      state.releaseInfo = null;
+      updateReleaseBadge();
+      return;
+    }
+
+    const payload = await response.json().catch(() => null);
+    state.releaseInfo = payload && typeof payload === "object" ? payload : null;
+  } catch {
+    state.releaseInfo = null;
+  }
+
+  updateReleaseBadge();
+}
+
 const TAB_NAMER_SUFFIX = ":tab-namer";
 const TAB_NAMER_MAX_CHARS = 30;
 const TAB_NAMER_MAX_WORDS = 5;
@@ -804,6 +859,7 @@ const state = {
     compactionMidTurnPrecheck: false,
     compactionTruncateAfterCompaction: false,
     compactionMaxActiveTranscriptBytes: "",
+    compactionReserveTokensFloor: 0,
     resetMode: "daily",
     resetAtHour: 4,
     resetIdleMinutes: 240,
@@ -826,6 +882,7 @@ const state = {
   onboardingHintShown: false,
   pairingRequired: false,
   pairingRequestId: "",
+  releaseInfo: null,
   connectionDebug: [],
   connectionDebugMax: 120,
   
@@ -1431,6 +1488,8 @@ async function initApp() {
 
   // Always show chat container
   ui.chatContainer.classList.add("active");
+  updateReleaseBadge();
+  void loadReleaseBadge();
 
   if (!state.gatewayUrl || !state.token) {
     const autoConn = await loadAutoBootstrapConnection();
@@ -2067,6 +2126,10 @@ async function loadDefaults() {
     const compactionMaxActiveTranscriptBytes = typeof compaction?.maxActiveTranscriptBytes === "string"
       ? compaction.maxActiveTranscriptBytes
       : "";
+    const parsedReserveFloor = Number(compaction?.reserveTokensFloor);
+    const compactionReserveTokensFloor = Number.isFinite(parsedReserveFloor) && parsedReserveFloor > 0
+      ? Math.round(parsedReserveFloor)
+      : 0;
     const parsedAgentTimeoutSeconds = Number(ad?.timeoutSeconds);
     const parsedLegacyIdleTimeoutSeconds = Number(ad?.llm?.idleTimeoutSeconds);
     const resolvedAgentTimeout = Number.isFinite(parsedAgentTimeoutSeconds) && parsedAgentTimeoutSeconds > 0
@@ -2108,6 +2171,7 @@ async function loadDefaults() {
       compactionMidTurnPrecheck,
       compactionTruncateAfterCompaction,
       compactionMaxActiveTranscriptBytes,
+      compactionReserveTokensFloor,
       resetMode,
       resetAtHour,
       resetIdleMinutes,
@@ -3785,33 +3849,34 @@ function updateBarControls() {
   }
 
   updateCompactionChip();
+  updateReleaseBadge();
 }
 
 function updateCompactionChip() {
-  const chip = document.getElementById("bar-compaction");
-  if (!chip) return;
-
   const tabKey = state.sessionKey || "main";
   const { count, latest } = getTabCompactionMeta(tabKey);
   const reasons = getCompactionReasonCounts(tabKey);
   const overflowCount = reasons.overflowRetry;
   const active = !!state.compactionInFlightBySession[tabKey];
 
-  let text = "compaction: none";
-  if (active) {
-    text = count > 0 ? `compaction: active · ${count}` : "compaction: active";
-    if (overflowCount > 0) text += ` · overflow ${overflowCount}`;
-  } else if (count > 0) {
-    text = overflowCount > 0 ? `compaction: ${count} · overflow ${overflowCount}` : `compaction: ${count}`;
-  }
-  chip.textContent = text;
+  const chip = document.getElementById("bar-compaction");
+  if (chip) {
+    let text = "compaction: none";
+    if (active) {
+      text = count > 0 ? `compaction: active · ${count}` : "compaction: active";
+      if (overflowCount > 0) text += ` · overflow ${overflowCount}`;
+    } else if (count > 0) {
+      text = overflowCount > 0 ? `compaction: ${count} · overflow ${overflowCount}` : `compaction: ${count}`;
+    }
+    chip.textContent = text;
 
-  chip.classList.toggle("active", active || count > 0);
-  chip.classList.toggle("is-live", active);
-  const details = latest?.createdAt
-    ? `Latest: ${compactionReasonLabel(latest.reason)} · ${cronTimeAgo(Number(latest.createdAt))}`
-    : (overflowCount > 0 ? `Overflow retries tracked: ${overflowCount}` : "No checkpoints yet");
-  chip.title = `${tabCompactionSummaryTitle(tabKey)}\n${details}\nClick to refresh`;
+    chip.classList.toggle("active", active || count > 0);
+    chip.classList.toggle("is-live", active);
+    const details = latest?.createdAt
+      ? `Latest: ${compactionReasonLabel(latest.reason)} · ${cronTimeAgo(Number(latest.createdAt))}`
+      : (overflowCount > 0 ? `Overflow retries tracked: ${overflowCount}` : "No checkpoints yet");
+    chip.title = `${tabCompactionSummaryTitle(tabKey)}\n${details}\nClick to refresh`;
+  }
 
   if (state.gateway?.connected) {
     void loadCompactionCheckpoints(tabKey);
@@ -4317,9 +4382,6 @@ document.getElementById("bar-menu")?.addEventListener("click", (event) =>
 
 document.getElementById("bar-home-pair")?.addEventListener("click", (event) =>
   openHomePairMenu(event.currentTarget));
-
-document.getElementById("bar-compaction")?.addEventListener("click", () =>
-  void loadCompactionCheckpoints(state.sessionKey || "main", { force: true }));
 
 async function openModelPicker(opts = {}) {
   // opts.current: current model id, opts.onSelect: callback(fullId, modal)
@@ -7094,60 +7156,117 @@ function isCompactionToolName(name) {
   return n.includes("compaction") || n.includes("sessions.compact");
 }
 
+function isOverflowSignalText(text) {
+  const t = str(text).toLowerCase();
+  if (!t) return false;
+  return (
+    t.includes("overflow") ||
+    t.includes("request_too_large") ||
+    t.includes("context length exceeded") ||
+    t.includes("input exceeds the maximum number of tokens") ||
+    t.includes("input token count exceeds the maximum number of input tokens") ||
+    t.includes("input is too long for the model")
+  );
+}
+
+function compactionEventLabel(payloadData, fallback = "Compacting context") {
+  const reason = str(payloadData?.reason, str(payloadData?.trigger, str(payloadData?.mode))).toLowerCase();
+  if (reason === "overflow-retry" || isOverflowSignalText(reason)) return "Overflow retry: compacting context";
+  if (reason === "timeout-retry") return "Timeout retry: compacting context";
+
+  const detail = summarizeToolResult(payloadData?.partialResult || payloadData?.result);
+  if (isOverflowSignalText(detail)) return "Overflow retry: compacting context";
+  return fallback;
+}
+
 function handleStreamEvent(payload) {
   const stream = str(payload.stream);
   const eventState = str(payload.state);
   const payloadData = payload.data;
+  const earlyToolName = str(payloadData?.name, str(payloadData?.toolName, str(payload.toolName, str(payload.name))));
+  const earlyCompactionEvent = stream === "compaction" || eventState === "compacting" || isCompactionToolName(earlyToolName);
 
   let sessionKey = resolveStreamSession(payload);
   let isActiveTab = sessionKey === state.sessionKey;
 
   if (!sessionKey || !state.streams.has(sessionKey)) {
-    if (stream === "compaction" || eventState === "compacting") {
+    if (earlyCompactionEvent) {
       const cPhase = str(payloadData?.phase);
       const payloadTabKey = resolveTabKey(payload.sessionKey);
-      const targetTabKey = payloadTabKey || resolveTabKey(sessionKey) || (isActiveTab ? state.sessionKey : null);
+      const matchedTabKey = matchActiveSessionKey(payload);
+      const targetTabKey = payloadTabKey || resolveTabKey(sessionKey) || matchedTabKey || (isActiveTab ? state.sessionKey : null);
       const isEnd = cPhase === "end";
       if (targetTabKey) {
         setCompactionInFlight(targetTabKey, !isEnd);
         if (isEnd) void loadCompactionCheckpoints(targetTabKey, { force: true });
+
+        if (!state.streams.has(targetTabKey)) {
+          const runId = str(payload.runId, str(payloadData?.runId));
+          const startedAtMs = normalizeEpochMs(payloadData?.timestamp) || normalizeEpochMs(payload?.timestamp) || Date.now();
+          const ss = {
+            runId: runId || "compaction-" + Date.now(),
+            startedAtMs,
+            text: null,
+            toolCalls: [],
+            items: [],
+            splitPoints: [],
+            lastDeltaTime: 0,
+            lastEventAtMs: Date.now(),
+            compactTimer: null,
+            workingTimer: null,
+            recoveryAttemptedAtMs: 0,
+            recoveryInFlight: false,
+            stalledAtMs: 0,
+            background: true,
+          };
+          state.streams.set(targetTabKey, ss);
+          if (runId) state.runToSession.set(runId, targetTabKey);
+        }
+
+        sessionKey = targetTabKey;
+        isActiveTab = sessionKey === state.sessionKey;
       }
+
       if (isActiveTab || !sessionKey) {
         if (isEnd) setTimeout(() => hideBanner(), 2000);
-        else showBanner("Compacting context...");
+        else showBanner(compactionEventLabel(payloadData));
       }
+
+      if (!sessionKey || !state.streams.has(sessionKey)) return;
     }
-    // Auto-create stream for startup/reset events on active session
-    // Mark as background so it doesn't block user sends
-    const matched = matchActiveSessionKey(payload);
-    if (matched && (stream === "tool" || stream === "lifecycle" || stream === "fallback" || eventState === "lifecycle")) {
-      const runId = str(payload.runId, str(payloadData?.runId));
-      const startedAtMs = normalizeEpochMs(payloadData?.timestamp) || normalizeEpochMs(payload?.timestamp) || Date.now();
-      const ss = {
-        runId: runId || "startup-" + Date.now(),
-        startedAtMs,
-        text: null,
-        toolCalls: [],
-        items: [],
-        splitPoints: [],
-        lastDeltaTime: 0,
-        lastEventAtMs: Date.now(),
-        compactTimer: null,
-        workingTimer: null,
-        recoveryAttemptedAtMs: 0,
-        recoveryInFlight: false,
-        stalledAtMs: 0,
-        background: true,  // not user-initiated — don't block sending
-      };
-      state.streams.set(matched, ss);
-      setWorkingSince(matched, startedAtMs);
-      if (runId) state.runToSession.set(runId, matched);
-      sessionKey = matched;
-      isActiveTab = true;
-      hideLoading(); // replace static "Loading…" with live tool activity
-      // Don't set stop mode for background streams — user should still be able to send
-    } else {
-      return;
+    if (!sessionKey || !state.streams.has(sessionKey)) {
+      // Auto-create stream for startup/reset events on active session
+      // Mark as background so it doesn't block user sends
+      const matched = matchActiveSessionKey(payload);
+      if (matched && (stream === "tool" || stream === "lifecycle" || stream === "fallback" || eventState === "lifecycle")) {
+        const runId = str(payload.runId, str(payloadData?.runId));
+        const startedAtMs = normalizeEpochMs(payloadData?.timestamp) || normalizeEpochMs(payload?.timestamp) || Date.now();
+        const ss = {
+          runId: runId || "startup-" + Date.now(),
+          startedAtMs,
+          text: null,
+          toolCalls: [],
+          items: [],
+          splitPoints: [],
+          lastDeltaTime: 0,
+          lastEventAtMs: Date.now(),
+          compactTimer: null,
+          workingTimer: null,
+          recoveryAttemptedAtMs: 0,
+          recoveryInFlight: false,
+          stalledAtMs: 0,
+          background: true,  // not user-initiated — don't block sending
+        };
+        state.streams.set(matched, ss);
+        setWorkingSince(matched, startedAtMs);
+        if (runId) state.runToSession.set(runId, matched);
+        sessionKey = matched;
+        isActiveTab = true;
+        hideLoading(); // replace static "Loading…" with live tool activity
+        // Don't set stop mode for background streams — user should still be able to send
+      } else {
+        return;
+      }
     }
   }
 
@@ -7198,10 +7317,10 @@ function handleStreamEvent(payload) {
   const toolCallId = str(payloadData?.toolCallId, str(payload.toolCallId));
   const compactionTool = isCompactionToolName(toolName);
   const compactionEvent = stream === "compaction" || eventState === "compacting" || compactionTool;
-  const compactionStart = phase === "start" || eventState === "tool_use";
   const compactionEnd = phase === "end" || phase === "result";
 
   if (compactionEvent) {
+    const compactionLabel = compactionEventLabel(payloadData);
     const resolvedCompactionId = toolCallId || `compact-${sessionKey}`;
     const item = getToolEntry(ss, resolvedCompactionId);
 
@@ -7216,7 +7335,7 @@ function handleStreamEvent(payload) {
       void loadCompactionCheckpoints(sessionKey, { force: true });
       if (isActiveTab) {
         const detail = item?.detail || "";
-        appendToolCall("Compacting context", undefined, false, {
+        appendToolCall(item?.label || compactionLabel, undefined, false, {
           toolCallId: resolvedCompactionId,
           detail,
           isError: false,
@@ -7228,16 +7347,17 @@ function handleStreamEvent(payload) {
       return;
     }
 
-    const detail = phase === "update" ? summarizeToolResult(payloadData?.partialResult) : "";
+    const detail = phase === "update" ? summarizeToolResult(payloadData?.partialResult || payloadData?.result) : "";
     if (item) {
       item.active = true;
+      item.label = compactionLabel;
       if (detail) item.detail = detail;
     } else {
-      ss.toolCalls.push("Compacting context");
+      ss.toolCalls.push(compactionLabel);
       ss.items.push({
         type: "tool",
         id: resolvedCompactionId,
-        label: "Compacting context",
+        label: compactionLabel,
         active: true,
         detail,
         isError: false,
@@ -7245,14 +7365,14 @@ function handleStreamEvent(payload) {
     }
 
     if (isActiveTab) {
-      appendToolCall("Compacting context", undefined, true, {
+      appendToolCall(compactionLabel, undefined, true, {
         toolCallId: resolvedCompactionId,
         detail,
         isError: false,
       });
-      renderTypingLabel("Compacting context", sessionKey);
+      renderTypingLabel(compactionLabel, sessionKey);
       ui.typingIndicator.classList.remove("oc-hidden");
-      showBanner("Compacting context...");
+      showBanner(compactionLabel);
     }
     return;
   }
@@ -9648,18 +9768,19 @@ const RECOMMENDED_RELIABILITY_DEFAULTS = {
   contextInjection: "continuation-skip",
   contextPruning: {
     mode: "cache-ttl",
-    ttl: "15m",
-    keepLastAssistants: 4,
+    ttl: "10m",
+    keepLastAssistants: 3,
     softTrimRatio: 0.3,
     hardClearRatio: 0.5,
-    minPrunableToolChars: 50000,
+    minPrunableToolChars: 30000,
     softTrim: { maxChars: 4000, headChars: 1500, tailChars: 1500 },
     hardClear: { enabled: true, placeholder: "[Old tool result content cleared]" },
   },
   compaction: {
     midTurnPrecheck: { enabled: true },
     truncateAfterCompaction: true,
-    maxActiveTranscriptBytes: "12mb",
+    maxActiveTranscriptBytes: "8mb",
+    reserveTokensFloor: 24000,
   },
 };
 
@@ -9822,6 +9943,7 @@ function updateReliabilityPanel() {
   const midTurnOn = d.compactionMidTurnPrecheck === true;
   const truncateOn = d.compactionTruncateAfterCompaction === true;
   const maxTranscriptOn = String(d.compactionMaxActiveTranscriptBytes || "") === rec.compaction.maxActiveTranscriptBytes;
+  const reserveFloorOn = Number(d.compactionReserveTokensFloor || 0) === Number(rec.compaction.reserveTokensFloor || 0);
   const pendingAgentTimeoutRaw = Number(state.pendingDefaults.agentTimeoutSeconds);
   const defaultAgentTimeoutRaw = Number(d.agentTimeoutSeconds);
   const currentAgentTimeout = normalizeIdleTimeoutSeconds(
@@ -9882,10 +10004,11 @@ function updateReliabilityPanel() {
     '</div>' +
     renderReliabilityToggle('rel-midturn-precheck', 'Mid-turn overflow precheck', midTurnOn, 'Recommended ON') +
     renderReliabilityToggle('rel-truncate', 'Transcript shrink after compaction', truncateOn, 'Recommended ON') +
-    renderReliabilityToggle('rel-max-transcript', 'Compaction auto-threshold', maxTranscriptOn, 'Recommended ON: 12mb');
+    renderReliabilityToggle('rel-max-transcript', 'Compaction auto-threshold', maxTranscriptOn, `Recommended ON: ${rec.compaction.maxActiveTranscriptBytes}`) +
+    renderReliabilityToggle('rel-reserve-floor', 'Reserve tokens floor', reserveFloorOn, `Recommended ON: ${Number(rec.compaction.reserveTokensFloor || 0).toLocaleString()} tokens`);
 
   html += '<div style="margin-top:6px;font-size:11px;line-height:1.35;color:var(--text-muted);opacity:0.85">' +
-    'These settings reduce overflow retries in long tool-heavy sessions.' +
+    'These settings proactively compact and trim tool-heavy sessions to reduce overflow retries.' +
     '</div>';
 
   html += '<div class="hud-settings-divider" style="margin:6px 0"></div>' +
@@ -9947,6 +10070,7 @@ async function applyReliabilitySettingsFromPanel() {
     const midTurnOn = !!document.getElementById('rel-midturn-precheck')?.checked;
     const truncateOn = !!document.getElementById('rel-truncate')?.checked;
     const maxTranscriptOn = !!document.getElementById('rel-max-transcript')?.checked;
+    const reserveFloorOn = !!document.getElementById('rel-reserve-floor')?.checked;
 
     const contextPruningPatch = contextPruningOn
       ? { ...RECOMMENDED_RELIABILITY_DEFAULTS.contextPruning, ttl: pruningTtl }
@@ -9956,6 +10080,7 @@ async function applyReliabilitySettingsFromPanel() {
       midTurnPrecheck: { enabled: midTurnOn },
       truncateAfterCompaction: truncateOn,
       maxActiveTranscriptBytes: maxTranscriptOn ? RECOMMENDED_RELIABILITY_DEFAULTS.compaction.maxActiveTranscriptBytes : null,
+      reserveTokensFloor: reserveFloorOn ? Number(RECOMMENDED_RELIABILITY_DEFAULTS.compaction.reserveTokensFloor || 0) : null,
     };
 
     const rawPatch = {
@@ -9977,6 +10102,7 @@ async function applyReliabilitySettingsFromPanel() {
     state.defaults.compactionMidTurnPrecheck = midTurnOn;
     state.defaults.compactionTruncateAfterCompaction = truncateOn;
     state.defaults.compactionMaxActiveTranscriptBytes = maxTranscriptOn ? RECOMMENDED_RELIABILITY_DEFAULTS.compaction.maxActiveTranscriptBytes : "";
+    state.defaults.compactionReserveTokensFloor = reserveFloorOn ? Number(RECOMMENDED_RELIABILITY_DEFAULTS.compaction.reserveTokensFloor || 0) : 0;
 
     setTimeout(() => { state.gatewayRestarting = false; }, 2000);
     updateReliabilityPanel();
@@ -10023,6 +10149,7 @@ async function applyRecommendedReliabilityDefaults() {
     state.defaults.compactionMidTurnPrecheck = true;
     state.defaults.compactionTruncateAfterCompaction = true;
     state.defaults.compactionMaxActiveTranscriptBytes = rec.compaction.maxActiveTranscriptBytes;
+    state.defaults.compactionReserveTokensFloor = Number(rec.compaction.reserveTokensFloor || 0);
 
     setTimeout(() => { state.gatewayRestarting = false; }, 2000);
     updateReliabilityPanel();
