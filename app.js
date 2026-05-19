@@ -7088,6 +7088,12 @@ function fallbackStatusLabel(data, phase) {
     : `↪️ Fallback to ${target}`;
 }
 
+function isCompactionToolName(name) {
+  const n = str(name).toLowerCase();
+  if (!n) return false;
+  return n.includes("compaction") || n.includes("sessions.compact");
+}
+
 function handleStreamEvent(payload) {
   const stream = str(payload.stream);
   const eventState = str(payload.state);
@@ -7190,6 +7196,66 @@ function handleStreamEvent(payload) {
   const toolName = str(payloadData?.name, str(payloadData?.toolName, str(payload.toolName, str(payload.name))));
   const phase = str(payloadData?.phase, str(payload.phase));
   const toolCallId = str(payloadData?.toolCallId, str(payload.toolCallId));
+  const compactionTool = isCompactionToolName(toolName);
+  const compactionEvent = stream === "compaction" || eventState === "compacting" || compactionTool;
+  const compactionStart = phase === "start" || eventState === "tool_use";
+  const compactionEnd = phase === "end" || phase === "result";
+
+  if (compactionEvent) {
+    const resolvedCompactionId = toolCallId || `compact-${sessionKey}`;
+    const item = getToolEntry(ss, resolvedCompactionId);
+
+    setCompactionInFlight(sessionKey, !compactionEnd);
+
+    if (compactionEnd) {
+      if (item) {
+        item.active = false;
+        const maybeDetail = summarizeToolResult(payloadData?.result || payloadData?.partialResult);
+        if (maybeDetail) item.detail = maybeDetail;
+      }
+      void loadCompactionCheckpoints(sessionKey, { force: true });
+      if (isActiveTab) {
+        const detail = item?.detail || "";
+        appendToolCall("Compacting context", undefined, false, {
+          toolCallId: resolvedCompactionId,
+          detail,
+          isError: false,
+        });
+        renderTypingLabel(STATUS_FINISHING_UP, sessionKey);
+        ui.typingIndicator.classList.remove("oc-hidden");
+        setTimeout(() => hideBanner(), 2000);
+      }
+      return;
+    }
+
+    const detail = phase === "update" ? summarizeToolResult(payloadData?.partialResult) : "";
+    if (item) {
+      item.active = true;
+      if (detail) item.detail = detail;
+    } else {
+      ss.toolCalls.push("Compacting context");
+      ss.items.push({
+        type: "tool",
+        id: resolvedCompactionId,
+        label: "Compacting context",
+        active: true,
+        detail,
+        isError: false,
+      });
+    }
+
+    if (isActiveTab) {
+      appendToolCall("Compacting context", undefined, true, {
+        toolCallId: resolvedCompactionId,
+        detail,
+        isError: false,
+      });
+      renderTypingLabel("Compacting context", sessionKey);
+      ui.typingIndicator.classList.remove("oc-hidden");
+      showBanner("Compacting context...");
+    }
+    return;
+  }
 
   if (stream === "fallback" || (stream === "lifecycle" && (phase === "fallback" || phase === "fallback_cleared"))) {
     const label = fallbackStatusLabel(payloadData, phase);
@@ -7254,33 +7320,6 @@ function handleStreamEvent(payload) {
       renderTypingLabel(STATUS_WORKING, sessionKey);
       ui.typingIndicator.classList.remove("oc-hidden");
       if (state.autoScrollPinned) scrollToBottom(true);
-    }
-  } else if (stream === "compaction" || eventState === "compacting") {
-    const compactionEnded = phase === "end";
-    setCompactionInFlight(sessionKey, !compactionEnded);
-    if (compactionEnded) {
-      void loadCompactionCheckpoints(sessionKey, { force: true });
-      if (isActiveTab) {
-        renderTypingLabel(STATUS_FINISHING_UP, sessionKey);
-        ui.typingIndicator.classList.remove("oc-hidden");
-        setTimeout(() => hideBanner(), 2000);
-      }
-    } else {
-      ss.toolCalls.push("Compacting memory");
-      ss.items.push({
-        type: "tool",
-        id: `compact-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
-        label: "Compacting memory",
-        active: false,
-        detail: "",
-        isError: false,
-      });
-      if (isActiveTab) {
-        appendToolCall("Compacting memory");
-        renderTypingLabel("Compacting context", sessionKey);
-        ui.typingIndicator.classList.remove("oc-hidden");
-        showBanner("Compacting context...");
-      }
     }
   } else if (stream === "lifecycle") {
     if (!isActiveTab) return;
