@@ -4212,6 +4212,54 @@ body.text-large .openclaw-tool-item { font-size: 12px; }
   flex-shrink: 0;
 }
 
+.openclaw-compaction-marker {
+  margin: 10px auto;
+  max-width: 680px;
+  width: calc(100% - 20px);
+  text-align: center;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  padding: 10px 8px;
+  color: var(--text-muted);
+}
+
+.openclaw-compaction-label {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  color: var(--text-faint);
+}
+
+.openclaw-compaction-sub {
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.openclaw-compaction-btn {
+  margin-top: 8px;
+  border: 1px solid rgba(255,255,255,0.16);
+  background: rgba(255,255,255,0.06);
+  color: var(--text-normal);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.openclaw-compaction-btn:hover {
+  background: rgba(255,255,255,0.1);
+}
+
+[data-theme="light"] .openclaw-compaction-marker {
+  border-top-color: rgba(0,0,0,0.08);
+  border-bottom-color: rgba(0,0,0,0.08);
+}
+
+[data-theme="light"] .openclaw-compaction-btn {
+  border-color: rgba(0,0,0,0.18);
+  background: rgba(0,0,0,0.04);
+}
+
 .openclaw-tab-compaction-badge:hover,
 .oc-dd-compaction-badge:hover {
   color: var(--text-normal);

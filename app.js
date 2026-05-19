@@ -717,7 +717,7 @@ class GatewayClient {
     }
 
     const params = {
-      minProtocol: 3, maxProtocol: 3,
+      minProtocol: 4, maxProtocol: 4,
       client: { id: CLIENT_ID, version: "0.1.0", platform: "web", mode: CLIENT_MODE },
       role: ROLE, scopes: SCOPES, auth, device, caps: ["tool-events"],
     };
@@ -4724,6 +4724,13 @@ function messagesEquivalent(a, b) {
 
   const normalize = (m) => {
     if (!m || typeof m !== "object") return "";
+    if (m.role === "compaction") {
+      return JSON.stringify({
+        role: "compaction",
+        reason: str(m.reason),
+        timestamp: Number(m.timestamp) || 0,
+      });
+    }
     if (m.role === "toolResult") {
       return JSON.stringify({
         role: "toolResult",
@@ -5186,8 +5193,30 @@ async function loadChatHistory(opts) {
     const toolCallMetaById = new Map();
 
     let parsed = messages
-      .filter(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult")
+      .filter(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult" || m.type === "compaction")
       .map(m => {
+        if (m?.type === "compaction") {
+          const details = (m?.details && typeof m.details === "object") ? m.details : {};
+          const before = Number(details?.tokensBefore);
+          const after = Number(details?.tokensAfter);
+          const reason = str(details?.reason, str(m?.reason));
+          const stampRaw = m?.timestamp;
+          let ts = Number(stampRaw);
+          if (!Number.isFinite(ts) || ts <= 0) {
+            const parsedTs = Date.parse(String(stampRaw || ""));
+            ts = Number.isFinite(parsedTs) ? parsedTs : Date.now();
+          }
+
+          return {
+            role: "compaction",
+            reason,
+            summary: str(m?.summary),
+            tokensBefore: Number.isFinite(before) ? before : null,
+            tokensAfter: Number.isFinite(after) ? after : null,
+            timestamp: ts,
+          };
+        }
+
         if (m.role === "toolResult") {
           const toolCallId = str(m.toolCallId);
           const meta = toolCallMetaById.get(toolCallId);
@@ -5262,18 +5291,21 @@ async function loadChatHistory(opts) {
         };
       })
       .filter(m => {
+        if (m.role === "compaction") return true;
         if (m.role === "toolResult") return true;
         return (m.text.trim() || m.images.length > 0 || m.audios.length > 0 || m.omittedImages > 0 || m.omittedAudios > 0 || m.hasToolBlocks) && !m.text.startsWith("HEARTBEAT");
       });
 
     // Strip injected system messages from user messages
     parsed = parsed.map(m => {
+      if (m.role === "compaction") return m;
       if (m.role === "toolResult") return m;
       if (m.role === "user") {
         m.text = stripSystemMessages(m.text);
       }
       return m;
     }).filter(m => {
+      if (m.role === "compaction") return true;
       if (m.role === "toolResult") return true;
       return m.text.trim() || m.images.length > 0 || m.audios.length > 0 || m.omittedImages > 0 || m.omittedAudios > 0 || m.hasToolBlocks;
     });
@@ -5895,6 +5927,11 @@ function renderMessages(opts = {}) {
       continue;
     }
 
+    if (msg.role === "compaction") {
+      appendCompactionMarker(msg);
+      continue;
+    }
+
     if (msg.role === "toolResult") {
       if (shouldShowToolEvents()) {
         const { label, url } = buildToolLabel(msg.toolName || "", msg.toolArgs || {});
@@ -5991,6 +6028,33 @@ function renderMessages(opts = {}) {
     state.autoScrollPinned = false;
     updateScrollBottomButton();
   }
+}
+
+function appendCompactionMarker(msg) {
+  const wrap = document.createElement("div");
+  wrap.className = "openclaw-compaction-marker";
+
+  const label = document.createElement("div");
+  label.className = "openclaw-compaction-label";
+  label.textContent = "COMPACTED HISTORY";
+  wrap.appendChild(label);
+
+  const sub = document.createElement("div");
+  sub.className = "openclaw-compaction-sub";
+  const reason = str(msg?.reason).trim();
+  sub.textContent = reason
+    ? `Compaction: ${compactionReasonLabel(reason)} · ${cronTimeAgo(Number(msg?.timestamp || 0))}`
+    : `Conversation compacted · ${cronTimeAgo(Number(msg?.timestamp || 0))}`;
+  wrap.appendChild(sub);
+
+  const btn = document.createElement("button");
+  btn.className = "openclaw-compaction-btn";
+  btn.type = "button";
+  btn.textContent = "Open checkpoints";
+  btn.addEventListener("click", () => openCompactionPanelAtAnchor(btn, state.sessionKey || "main"));
+  wrap.appendChild(btn);
+
+  ui.messagesContainer.appendChild(wrap);
 }
 
 function shouldSuppressAudioPlayerForAssistant(userSlashCommand, msg) {
