@@ -798,6 +798,12 @@ const state = {
     thinking: "",
     reasoning: "",
     verbose: "",
+    contextInjection: "always",
+    contextPruningMode: "off",
+    contextPruningTtl: "",
+    compactionMidTurnPrecheck: false,
+    compactionTruncateAfterCompaction: false,
+    compactionMaxActiveTranscriptBytes: "",
     resetMode: "daily",
     resetAtHour: 4,
     resetIdleMinutes: 240,
@@ -805,7 +811,8 @@ const state = {
     heartbeatSession: "main",
     heartbeatTarget: "",
     heartbeatTo: "",
-    llmIdleTimeoutSeconds: 120,
+    agentTimeoutSeconds: 1800,
+    llmIdleTimeoutSeconds: 600,
   },
   
   // Pending default changes (not yet applied to config)
@@ -853,6 +860,14 @@ const state = {
   // Unread tracking
   unreadCounts: {},  // { [sessionKey]: number }
 
+  // Compaction visibility
+  compactionInFlightBySession: {}, // { [tabKey]: startedAtMs }
+  compactionCheckpointsBySession: {}, // { [tabKey]: [checkpoint, ...] }
+  compactionCheckpointFetchedAt: {}, // { [tabKey]: epochMs }
+  compactionCheckpointErrors: {}, // { [tabKey]: error string }
+  compactionCheckpointLoadingKey: "",
+  compactionPanelTabKey: "",
+
   // Stream state (per-session)
   streams: new Map(),
   runToSession: new Map(),
@@ -880,6 +895,7 @@ const state = {
   pendingAttachments: [],
   sending: false,
   processingQueueBySession: {},
+  queueInFlightBySession: {},
 
   // Auto-scroll behavior: keep following output only while user is at bottom
   autoScrollPinned: true,
@@ -1147,6 +1163,105 @@ function resolveTabKey(payloadSessionKey) {
   }
 
   return null;
+}
+
+function compactionReasonLabel(reason) {
+  const r = str(reason).toLowerCase();
+  if (r === "auto-threshold") return "auto threshold";
+  if (r === "overflow-retry") return "overflow retry";
+  if (r === "timeout-retry") return "timeout retry";
+  if (r === "manual") return "manual";
+  return r || "unknown";
+}
+
+function getTabCompactionMeta(tabKey) {
+  const key = tabKey || state.sessionKey || "main";
+  const tab = state.tabSessions.find((t) => t.key === key);
+  let count = Math.max(0, Number(tab?.compactionCount || 0));
+  let latest = tab?.latestCompaction && typeof tab.latestCompaction === "object"
+    ? tab.latestCompaction
+    : null;
+
+  const cached = state.compactionCheckpointsBySession[key];
+  if (Array.isArray(cached) && cached.length > 0) {
+    count = Math.max(count, cached.length);
+    if (!latest) latest = cached[0];
+  }
+
+  return { count, latest };
+}
+
+function getCompactionReasonCounts(tabKey) {
+  const key = tabKey || state.sessionKey || "main";
+  const checkpoints = Array.isArray(state.compactionCheckpointsBySession[key])
+    ? state.compactionCheckpointsBySession[key]
+    : [];
+
+  const counts = {
+    total: checkpoints.length,
+    overflowRetry: 0,
+    timeoutRetry: 0,
+    autoThreshold: 0,
+    manual: 0,
+  };
+
+  for (const cp of checkpoints) {
+    const reason = str(cp?.reason).toLowerCase();
+    if (reason === "overflow-retry") counts.overflowRetry += 1;
+    else if (reason === "timeout-retry") counts.timeoutRetry += 1;
+    else if (reason === "auto-threshold") counts.autoThreshold += 1;
+    else if (reason === "manual") counts.manual += 1;
+  }
+
+  return counts;
+}
+
+function tabCompactionSummaryTitle(tabKey) {
+  const key = tabKey || state.sessionKey || "main";
+  const { count, latest } = getTabCompactionMeta(key);
+  const active = !!state.compactionInFlightBySession[key];
+  const bits = [];
+  if (active) bits.push("Compacting now");
+  bits.push(count > 0 ? `${count} checkpoint${count === 1 ? "" : "s"}` : "No checkpoints yet");
+  if (latest?.createdAt) {
+    bits.push(`Latest: ${compactionReasonLabel(latest.reason)} · ${cronTimeAgo(Number(latest.createdAt))}`);
+  }
+  return bits.join(" • ");
+}
+
+function renderCompactionPanelIfOpen(tabKey) {
+  const open = document.getElementById("oc-compaction-panel");
+  if (!open) return;
+  if (state.compactionPanelTabKey && tabKey && state.compactionPanelTabKey !== tabKey) return;
+  renderCompactionPanel(open, state.compactionPanelTabKey || state.sessionKey || "main");
+}
+
+function setCompactionInFlight(tabKey, inFlight) {
+  const key = tabKey || state.sessionKey || "main";
+  const next = !!inFlight;
+  const prev = !!state.compactionInFlightBySession[key];
+  if (next) state.compactionInFlightBySession[key] = Date.now();
+  else delete state.compactionInFlightBySession[key];
+  if (prev === next) return;
+
+  const tab = state.tabSessions.find((t) => t.key === key);
+  if (tab) tab.compactionLive = next;
+
+  updateCompactionChip();
+  renderCompactionPanelIfOpen(key);
+
+  if (!state.renderingTabs) renderTabs();
+  if ((state.sessionKey || "main") === key) renderMobileTabSwitcher();
+}
+
+function clearCompactionStateForTab(tabKey) {
+  if (!tabKey) return;
+  delete state.compactionInFlightBySession[tabKey];
+  delete state.compactionCheckpointsBySession[tabKey];
+  delete state.compactionCheckpointFetchedAt[tabKey];
+  delete state.compactionCheckpointErrors[tabKey];
+  if (state.compactionCheckpointLoadingKey === tabKey) state.compactionCheckpointLoadingKey = "";
+  if (state.compactionPanelTabKey === tabKey) closeCompactionPanel();
 }
 
 /** Increment unread count for a tab and update all UI indicators */
@@ -1662,6 +1777,8 @@ function updateConnectionStatus(connected) {
     ui.messageInput.disabled = false;
     updateComposerPlaceholder();
     hideReconnectBanner();
+    // If anything was queued while disconnected, resume drain once online.
+    setTimeout(() => processQueue(state.sessionKey), 100);
   } else {
     addConnectionDebug("connection state: offline");
     stopHistoryInFlightPoll();
@@ -1940,14 +2057,31 @@ async function loadDefaults() {
     const thinking = ad?.thinkingDefault || "";
     const reasoning = ad?.reasoningDefault || "";
     const verbose = ad?.verboseDefault || "";
-    const parsedIdleTimeoutSeconds = Number(ad?.timeoutSeconds);
+    const contextInjection = String(ad?.contextInjection || "always");
+    const contextPruning = ad?.contextPruning || {};
+    const contextPruningMode = String(contextPruning?.mode || "off");
+    const contextPruningTtl = String(contextPruning?.ttl || "");
+    const compaction = ad?.compaction || {};
+    const compactionMidTurnPrecheck = compaction?.midTurnPrecheck?.enabled === true;
+    const compactionTruncateAfterCompaction = compaction?.truncateAfterCompaction === true;
+    const compactionMaxActiveTranscriptBytes = typeof compaction?.maxActiveTranscriptBytes === "string"
+      ? compaction.maxActiveTranscriptBytes
+      : "";
+    const parsedAgentTimeoutSeconds = Number(ad?.timeoutSeconds);
     const parsedLegacyIdleTimeoutSeconds = Number(ad?.llm?.idleTimeoutSeconds);
-    const resolvedIdleTimeout = Number.isFinite(parsedIdleTimeoutSeconds) && parsedIdleTimeoutSeconds > 0
-      ? Math.round(parsedIdleTimeoutSeconds)
-      : (Number.isFinite(parsedLegacyIdleTimeoutSeconds) && parsedLegacyIdleTimeoutSeconds > 0
-        ? Math.round(parsedLegacyIdleTimeoutSeconds)
-        : DEFAULT_LLM_IDLE_TIMEOUT_SECONDS);
-    const llmIdleTimeoutSeconds = normalizeIdleTimeoutSeconds(resolvedIdleTimeout, DEFAULT_LLM_IDLE_TIMEOUT_SECONDS);
+    const resolvedAgentTimeout = Number.isFinite(parsedAgentTimeoutSeconds) && parsedAgentTimeoutSeconds > 0
+      ? Math.round(parsedAgentTimeoutSeconds)
+      : DEFAULT_AGENT_TIMEOUT_SECONDS;
+    const agentTimeoutSeconds = normalizeIdleTimeoutSeconds(resolvedAgentTimeout, DEFAULT_AGENT_TIMEOUT_SECONDS);
+
+    const localIdleTimeoutRaw = Number(localStorage.getItem(LLM_IDLE_TIMEOUT_STORAGE_KEY));
+    const fallbackIdleTimeout = Number.isFinite(parsedLegacyIdleTimeoutSeconds) && parsedLegacyIdleTimeoutSeconds > 0
+      ? Math.round(parsedLegacyIdleTimeoutSeconds)
+      : agentTimeoutSeconds;
+    const llmIdleTimeoutSeconds = normalizeIdleTimeoutSeconds(
+      Number.isFinite(localIdleTimeoutRaw) && localIdleTimeoutRaw > 0 ? localIdleTimeoutRaw : fallbackIdleTimeout,
+      DEFAULT_LLM_IDLE_TIMEOUT_SECONDS
+    );
 
     const resetCfg = parsed?.session?.reset || cfg?.session?.reset || {};
     const resetMode = resetCfg?.mode === "idle" ? "idle" : "daily";
@@ -1968,6 +2102,12 @@ async function loadDefaults() {
       thinking,
       reasoning,
       verbose,
+      contextInjection,
+      contextPruningMode,
+      contextPruningTtl,
+      compactionMidTurnPrecheck,
+      compactionTruncateAfterCompaction,
+      compactionMaxActiveTranscriptBytes,
       resetMode,
       resetAtHour,
       resetIdleMinutes,
@@ -1975,6 +2115,7 @@ async function loadDefaults() {
       heartbeatSession,
       heartbeatTarget,
       heartbeatTo,
+      agentTimeoutSeconds,
       llmIdleTimeoutSeconds,
     };
     
@@ -1992,6 +2133,7 @@ async function loadDefaults() {
     if (state.ttsConfig.elevenlabsKey === "__OPENCLAW_REDACTED__") state.ttsConfig.elevenlabsKey = "••••••••";
     
     updateDefaultsPanel();
+    updateReliabilityPanel();
     updateSchedulePanel();
     updateBarControls();
     loadTTSSettings();
@@ -2102,6 +2244,12 @@ async function switchAgent(agent) {
   }
   state.messages = [];
   state.tabCache = {};
+  state.compactionInFlightBySession = {};
+  state.compactionCheckpointsBySession = {};
+  state.compactionCheckpointFetchedAt = {};
+  state.compactionCheckpointErrors = {};
+  state.compactionCheckpointLoadingKey = "";
+  closeCompactionPanel();
   ui.messagesContainer.innerHTML = "";
   showLoading("Loading…");
   await renderTabs();
@@ -2563,9 +2711,31 @@ async function _renderTabsInner() {
     const max = homeSession.contextTokens || 200000;
     const pctRaw = contextUsagePercentRaw(used, max);
     const pct = contextUsagePercentFill(pctRaw);
-    state.tabSessions.push({ key: "main", label: "Home", pct, pctRaw, used, max, model: homeSession.model || "" });
+    state.tabSessions.push({
+      key: "main",
+      label: "Home",
+      pct,
+      pctRaw,
+      used,
+      max,
+      model: homeSession.model || "",
+      compactionCount: Math.max(0, Number(homeSession.compactionCheckpointCount || 0)),
+      latestCompaction: homeSession.latestCompactionCheckpoint || null,
+      compactionLive: !!state.compactionInFlightBySession.main,
+    });
   } else {
-    state.tabSessions.push({ key: "main", label: "Home", pct: 0, pctRaw: 0, used: 0, max: 200000, model: state.currentModel || "" });
+    state.tabSessions.push({
+      key: "main",
+      label: "Home",
+      pct: 0,
+      pctRaw: 0,
+      used: 0,
+      max: 200000,
+      model: state.currentModel || "",
+      compactionCount: 0,
+      latestCompaction: null,
+      compactionLive: !!state.compactionInFlightBySession.main,
+    });
   }
 
   const others = convSessions
@@ -2632,12 +2802,34 @@ async function _renderTabsInner() {
       label = "Untitled";
     }
 
-    state.tabSessions.push({ key: sk, label: label || "Untitled", pct, pctRaw, used, max, model: s.model || "" });
+    state.tabSessions.push({
+      key: sk,
+      label: label || "Untitled",
+      pct,
+      pctRaw,
+      used,
+      max,
+      model: s.model || "",
+      compactionCount: Math.max(0, Number(s.compactionCheckpointCount || 0)),
+      latestCompaction: s.latestCompactionCheckpoint || null,
+      compactionLive: !!state.compactionInFlightBySession[sk],
+    });
   }
 
   // Ensure the active session always has a tab (sessions.list race condition)
   if (currentKey !== "main" && !state.tabSessions.find(t => t.key === currentKey)) {
-    state.tabSessions.push({ key: currentKey, label: "Untitled", pct: 0, pctRaw: 0, used: 0, max: 200000, model: "" });
+    state.tabSessions.push({
+      key: currentKey,
+      label: "Untitled",
+      pct: 0,
+      pctRaw: 0,
+      used: 0,
+      max: 200000,
+      model: "",
+      compactionCount: 0,
+      latestCompaction: null,
+      compactionLive: !!state.compactionInFlightBySession[currentKey],
+    });
   }
 
   const liveTabKeys = new Set(state.tabSessions.map(t => t.key));
@@ -2646,6 +2838,10 @@ async function _renderTabsInner() {
       clearTabRenameFallback(state.tabRenameState[key]);
       delete state.tabRenameState[key];
     }
+  }
+
+  for (const key of Object.keys(state.compactionCheckpointsBySession || {})) {
+    if (!liveTabKeys.has(key)) clearCompactionStateForTab(key);
   }
 
   for (const tab of state.tabSessions) {
@@ -2861,6 +3057,11 @@ function queueMessage(text, attachments) {
   state.messageQueue[key].push(entry);
   persistMessageQueue();
   renderQueuedMessages();
+  const queuedCount = state.messageQueue[key]?.length || 0;
+  showBanner(`Queued (${queuedCount})`);
+  setTimeout(() => {
+    if (!hasActiveRunInSession(state.sessionKey)) hideBanner();
+  }, 1200);
   return true;
 }
 
@@ -3018,14 +3219,14 @@ function processQueue(sessionKey = state.sessionKey) {
   const key = sessionKey || state.sessionKey;
   if (!key) return;
 
-  // Composer-backed send pipeline is currently active-tab only.
-  if (key !== state.sessionKey) return;
-
   // Lock: one drain loop per session key
   if (state.processingQueueBySession[key]) return;
 
   const queue = state.messageQueue[key];
   if (!queue || queue.length === 0) return;
+
+  // One queued run at a time per session: wait for final/abort/error before sending next.
+  if (state.queueInFlightBySession[key]) return;
 
   // Don't process if still streaming, transcript indicates an in-flight run,
   // or we're already sending.
@@ -3045,12 +3246,17 @@ function processQueue(sessionKey = state.sessionKey) {
   state.processingQueueBySession[key] = true;
 
   const queuedAttachments = cloneAttachmentDraftList(next.attachments || []);
+  let accepted = false;
 
   sendMessage(next.text || '', {
+    sessionKey: key,
+    hideUserBubble: key !== state.sessionKey,
     attachments: queuedAttachments,
     preserveComposer: true,
   }).then((sent) => {
     if (!sent) return;
+    accepted = true;
+    state.queueInFlightBySession[key] = true;
 
     const latestQueue = state.messageQueue[key];
     if (latestQueue && latestQueue.length > 0) {
@@ -3070,15 +3276,18 @@ function processQueue(sessionKey = state.sessionKey) {
   }).finally(() => {
     delete state.processingQueueBySession[key];
 
-    // Drain next queued message if any remain
-    const remaining = state.messageQueue[key];
-    if (remaining && remaining.length > 0) {
-      setTimeout(() => processQueue(key), 500);
+    // If send wasn't accepted, allow retry on the same queued item.
+    if (!accepted) {
+      const remaining = state.messageQueue[key];
+      if (remaining && remaining.length > 0) {
+        setTimeout(() => processQueue(key), 1000);
+      }
     }
   });
 }
 
-async function switchTab(tab) {
+async function switchTab(tab, opts = {}) {
+  const forceBottom = !!opts.forceBottom;
   // Save draft from current tab before switching
   saveDraft();
   saveAttachmentDraft();
@@ -3087,6 +3296,7 @@ async function switchTab(tab) {
   ui.typingIndicator.classList.add("oc-hidden");
   setSendButtonStopMode(false);
   hideBanner();
+  closeCompactionPanel();
 
   state.sessionKey = tab.key;
   localStorage.setItem("sessionKey", tab.key);
@@ -3106,13 +3316,13 @@ async function switchTab(tab) {
   const cached = state.tabCache[tab.key];
   if (cached) {
     state.messages = [...cached.messages];
-    renderMessages();
+    renderMessages({ forceBottom });
     // Background refresh (don't await)
     loadChatHistory({ background: true });
   } else {
     state.messages = [];
     ui.messagesContainer.innerHTML = "";
-    await loadChatHistory();
+    await loadChatHistory({ forceBottom });
   }
 
   restoreStreamUI();
@@ -3203,6 +3413,8 @@ async function closeTab(tab, currentKey) {
   clearDraft(tab.key);
   delete state.messageQueue[tab.key];
   delete state.processingQueueBySession[tab.key];
+  delete state.queueInFlightBySession[tab.key];
+  clearCompactionStateForTab(tab.key);
   persistMessageQueue();
   delete state.tabCache[tab.key];
   clearWorkSummaries(tab.key);
@@ -3317,6 +3529,30 @@ async function updateContextMeter() {
     const session = sessions.find((s) => normalizeSessionKey(s.key) === effectiveSk);
     if (!session) return;
 
+    const sessionsByNormalizedKey = new Map(
+      sessions.map((s) => [normalizeSessionKey(s.key), s])
+    );
+    let compactionMetaChanged = false;
+    for (const tab of state.tabSessions) {
+      const gatewayKey = resolveGatewaySessionKey(tab.key);
+      const row = sessionsByNormalizedKey.get(gatewayKey);
+      if (!row) continue;
+
+      const nextCount = Math.max(0, Number(row.compactionCheckpointCount || 0));
+      const nextLatest = row.latestCompactionCheckpoint || null;
+      const prevCount = Math.max(0, Number(tab.compactionCount || 0));
+      const prevLatestId = str(tab.latestCompaction?.checkpointId);
+      const nextLatestId = str(nextLatest?.checkpointId);
+      const prevLatestAt = Number(tab.latestCompaction?.createdAt || 0);
+      const nextLatestAt = Number(nextLatest?.createdAt || 0);
+
+      if (nextCount !== prevCount || prevLatestId !== nextLatestId || prevLatestAt !== nextLatestAt) {
+        tab.compactionCount = nextCount;
+        tab.latestCompaction = nextLatest;
+        compactionMetaChanged = true;
+      }
+    }
+
     if (homeMirrorChanged || optionsChanged) {
       renderTabs();
       delete state.tabCache.main;
@@ -3362,6 +3598,8 @@ async function updateContextMeter() {
         activeTab.pct = pct;
         activeTab.pctRaw = pctRaw;
         activeTab.model = session.model || activeTab.model || "";
+        activeTab.compactionCount = Math.max(0, Number(session.compactionCheckpointCount || activeTab.compactionCount || 0));
+        activeTab.latestCompaction = session.latestCompactionCheckpoint || activeTab.latestCompaction || null;
       }
 
       const hamburgerBar = document.getElementById("hamburger-bar");
@@ -3370,7 +3608,9 @@ async function updateContextMeter() {
       }
 
       const mobileLabel = document.getElementById("tab-switcher-label");
-      if (mobileLabel) mobileLabel.title = meterTitle;
+      if (mobileLabel) {
+        mobileLabel.title = meterTitle;
+      }
     }
 
     const currentSessionKeys = new Set(
@@ -3397,10 +3637,14 @@ async function updateContextMeter() {
         updateComposerPlaceholder();
       }
       await renderTabs();
+    } else if (compactionMetaChanged && !state.renderingTabs) {
+      await renderTabs();
     }
-    
+
     // Update subagents panel from same sessions data (reuse fetched sessions)
     loadSubagents(sessions);
+    updateCompactionChip();
+    renderCompactionPanelIfOpen(state.sessionKey || "main");
   } catch { /* ignore */ }
 }
 
@@ -3538,6 +3782,218 @@ function updateBarControls() {
       homePairEl.classList.add("active");
       homePairEl.title = `Home is paired to ${opt?.label || "Telegram"}`;
     }
+  }
+
+  updateCompactionChip();
+}
+
+function updateCompactionChip() {
+  const chip = document.getElementById("bar-compaction");
+  if (!chip) return;
+
+  const tabKey = state.sessionKey || "main";
+  const { count, latest } = getTabCompactionMeta(tabKey);
+  const reasons = getCompactionReasonCounts(tabKey);
+  const overflowCount = reasons.overflowRetry;
+  const active = !!state.compactionInFlightBySession[tabKey];
+
+  let text = "compaction: none";
+  if (active) {
+    text = count > 0 ? `compaction: active · ${count}` : "compaction: active";
+    if (overflowCount > 0) text += ` · overflow ${overflowCount}`;
+  } else if (count > 0) {
+    text = overflowCount > 0 ? `compaction: ${count} · overflow ${overflowCount}` : `compaction: ${count}`;
+  }
+  chip.textContent = text;
+
+  chip.classList.toggle("active", active || count > 0);
+  chip.classList.toggle("is-live", active);
+  const details = latest?.createdAt
+    ? `Latest: ${compactionReasonLabel(latest.reason)} · ${cronTimeAgo(Number(latest.createdAt))}`
+    : (overflowCount > 0 ? `Overflow retries tracked: ${overflowCount}` : "No checkpoints yet");
+  chip.title = `${tabCompactionSummaryTitle(tabKey)}\n${details}\nClick to refresh`;
+
+  if (state.gateway?.connected) {
+    void loadCompactionCheckpoints(tabKey);
+  }
+}
+
+function compactionNeedsRefresh(tabKey, force = false) {
+  if (force) return true;
+  const key = tabKey || state.sessionKey || "main";
+  const fetchedAt = Number(state.compactionCheckpointFetchedAt[key] || 0);
+  const cached = state.compactionCheckpointsBySession[key];
+  const ageMs = Date.now() - fetchedAt;
+  const { count } = getTabCompactionMeta(key);
+  if (!Array.isArray(cached) || cached.length === 0) {
+    if (!fetchedAt) return true;
+    return count > 0;
+  }
+  if (cached.length < count) return true;
+  return ageMs > 120000;
+}
+
+async function loadCompactionCheckpoints(tabKey, opts = {}) {
+  const key = tabKey || state.sessionKey || "main";
+  if (!state.gateway?.connected) return;
+  if (state.compactionCheckpointLoadingKey === key) return;
+  const force = !!opts.force;
+  if (!compactionNeedsRefresh(key, force)) return;
+
+  state.compactionCheckpointLoadingKey = key;
+  state.compactionCheckpointErrors[key] = "";
+  renderCompactionPanelIfOpen(key);
+
+  try {
+    const result = await state.gateway.request("sessions.compaction.list", {
+      key: prefixedSessionKeyForTab(key),
+    });
+    const checkpoints = Array.isArray(result?.checkpoints)
+      ? [...result.checkpoints].sort((a, b) => (Number(b?.createdAt) || 0) - (Number(a?.createdAt) || 0))
+      : [];
+
+    state.compactionCheckpointsBySession[key] = checkpoints;
+    state.compactionCheckpointFetchedAt[key] = Date.now();
+    state.compactionCheckpointErrors[key] = "";
+
+    const tab = state.tabSessions.find((t) => t.key === key);
+    if (tab) {
+      tab.compactionCount = Math.max(0, checkpoints.length, Number(tab.compactionCount || 0));
+      tab.latestCompaction = checkpoints[0] || tab.latestCompaction || null;
+    }
+  } catch (err) {
+    state.compactionCheckpointErrors[key] = String(err || "Failed to load checkpoints");
+  } finally {
+    if (state.compactionCheckpointLoadingKey === key) state.compactionCheckpointLoadingKey = "";
+    updateCompactionChip();
+    renderCompactionPanelIfOpen(key);
+  }
+}
+
+function closeCompactionPanel() {
+  const panel = document.getElementById("oc-compaction-panel");
+  if (panel) panel.remove();
+  if (typeof state._compactionPanelOutsideHandler === "function") {
+    document.removeEventListener("mousedown", state._compactionPanelOutsideHandler);
+    state._compactionPanelOutsideHandler = null;
+  }
+  state.compactionPanelTabKey = "";
+}
+
+function positionCompactionPanel(panel, anchorEl) {
+  if (!panel || !anchorEl) return;
+  const rect = anchorEl.getBoundingClientRect();
+  const width = Math.min(460, Math.max(320, rect.width + 160));
+  panel.style.width = `${width}px`;
+  const left = Math.max(10, Math.min(window.innerWidth - width - 10, rect.left - 24));
+  panel.style.left = `${left}px`;
+  panel.style.top = `${Math.min(window.innerHeight - panel.offsetHeight - 10, rect.bottom + 8)}px`;
+}
+
+function openCompactionPanel(anchorEl, tabKey = state.sessionKey || "main") {
+  if (!anchorEl) return;
+  const key = tabKey || state.sessionKey || "main";
+
+  const existing = document.getElementById("oc-compaction-panel");
+  if (existing && state.compactionPanelTabKey === key) {
+    closeCompactionPanel();
+    return;
+  }
+
+  closeCompactionPanel();
+
+  const panel = document.createElement("div");
+  panel.id = "oc-compaction-panel";
+  panel.className = "oc-inline-menu is-scrollable oc-compaction-panel";
+  document.body.appendChild(panel);
+
+  state.compactionPanelTabKey = key;
+  renderCompactionPanel(panel, key);
+  positionCompactionPanel(panel, anchorEl);
+
+  const outside = (e) => {
+    if (!panel.contains(e.target) && e.target !== anchorEl) {
+      closeCompactionPanel();
+    }
+  };
+  state._compactionPanelOutsideHandler = outside;
+  setTimeout(() => document.addEventListener("mousedown", outside), 0);
+
+  if (compactionNeedsRefresh(key, false)) {
+    void loadCompactionCheckpoints(key);
+  }
+}
+
+function renderCompactionPanel(panel, tabKey) {
+  if (!panel) return;
+  const key = tabKey || state.sessionKey || "main";
+  const tab = state.tabSessions.find((t) => t.key === key);
+  const tabName = key === "main" ? "Home" : (tab?.label || key);
+  const { count, latest } = getTabCompactionMeta(key);
+  const loading = state.compactionCheckpointLoadingKey === key;
+  const error = state.compactionCheckpointErrors[key] || "";
+  const active = !!state.compactionInFlightBySession[key];
+  const checkpoints = Array.isArray(state.compactionCheckpointsBySession[key])
+    ? state.compactionCheckpointsBySession[key]
+    : [];
+
+  const esc = (v) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const compactNumber = (n) => Number.isFinite(Number(n)) ? Number(n).toLocaleString() : "—";
+
+  const itemHtml = checkpoints.map((cp) => {
+    const before = Number(cp?.tokensBefore);
+    const after = Number(cp?.tokensAfter);
+    const delta = Number.isFinite(before) && Number.isFinite(after) ? before - after : null;
+    const tokenLine = Number.isFinite(before) || Number.isFinite(after)
+      ? `${compactNumber(before)} → ${compactNumber(after)}${delta != null ? ` (${delta >= 0 ? "-" : "+"}${Math.abs(delta).toLocaleString()})` : ""}`
+      : "tokens unavailable";
+    const summary = str(cp?.summary).trim();
+
+    return `<div class="oc-compaction-item">
+      <div class="oc-compaction-item-head">
+        <strong>${esc(compactionReasonLabel(cp?.reason))}</strong>
+        <span class="oc-compaction-when">${esc(cronTimeAgo(Number(cp?.createdAt || 0)))}</span>
+      </div>
+      <div class="oc-compaction-tokens">${esc(tokenLine)}</div>
+      ${summary ? `<div class="oc-compaction-summary">${esc(summary)}</div>` : `<div class="oc-compaction-summary oc-muted">No summary recorded.</div>`}
+    </div>`;
+  }).join("");
+
+  panel.innerHTML = `
+    <div class="oc-inline-menu-title">Compaction · ${esc(tabName)}</div>
+    <div class="oc-compaction-topline ${active ? "is-live" : ""}">
+      ${active ? "🧹 Compacting now…" : "Compaction idle"}
+    </div>
+    <div class="oc-compaction-meta">
+      <span>${count} checkpoint${count === 1 ? "" : "s"}</span>
+      <span>${latest?.createdAt ? `latest: ${esc(compactionReasonLabel(latest.reason))} · ${esc(cronTimeAgo(Number(latest.createdAt)))}` : "no history yet"}</span>
+    </div>
+    <div class="oc-compaction-actions">
+      <button type="button" class="oc-inline-menu-item oc-compaction-action" data-compaction-action="refresh">${loading ? "Refreshing…" : "Refresh"}</button>
+      <button type="button" class="oc-inline-menu-item oc-compaction-action" data-compaction-action="close">Close</button>
+    </div>
+    ${error ? `<div class="oc-compaction-error">${esc(error)}</div>` : ""}
+    <div class="oc-compaction-list">
+      ${loading && checkpoints.length === 0 ? `<div class="oc-muted">Loading checkpoints…</div>` : ""}
+      ${!loading && checkpoints.length === 0 ? `<div class="oc-muted">No checkpoints yet.</div>` : ""}
+      ${itemHtml}
+    </div>
+  `;
+
+  const refreshBtn = panel.querySelector('[data-compaction-action="refresh"]');
+  if (refreshBtn) {
+    refreshBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void loadCompactionCheckpoints(key, { force: true });
+    });
+  }
+
+  const closeBtn = panel.querySelector('[data-compaction-action="close"]');
+  if (closeBtn) {
+    closeBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      closeCompactionPanel();
+    });
   }
 }
 
@@ -3861,6 +4317,9 @@ document.getElementById("bar-menu")?.addEventListener("click", (event) =>
 
 document.getElementById("bar-home-pair")?.addEventListener("click", (event) =>
   openHomePairMenu(event.currentTarget));
+
+document.getElementById("bar-compaction")?.addEventListener("click", () =>
+  void loadCompactionCheckpoints(state.sessionKey || "main", { force: true }));
 
 async function openModelPicker(opts = {}) {
   // opts.current: current model id, opts.onSelect: callback(fullId, modal)
@@ -4586,6 +5045,7 @@ function recordWorkSummary(sessionKey, runId, durationMs, outcome = "completed")
 
 async function loadChatHistory(opts) {
   const background = opts?.background || false;
+  const forceBottom = opts?.forceBottom === true;
   const targetKey = opts?.sessionKey || state.sessionKey;
   const requestKey = resolveGatewaySessionKey(targetKey);
   if (!state.gateway?.connected) return;
@@ -4830,6 +5290,11 @@ async function loadChatHistory(opts) {
     if (maybeInFlightStartedAt) state.historyInFlightStartedAt[targetKey] = maybeInFlightStartedAt;
     else delete state.historyInFlightStartedAt[targetKey];
 
+    // If history confirms no in-flight work for this session, release queued-send lock.
+    if (!maybeInFlight && !state.streams.has(targetKey)) {
+      delete state.queueInFlightBySession[targetKey];
+    }
+
     const previous = (targetKey === state.sessionKey)
       ? state.messages
       : (state.tabCache[targetKey]?.messages || []);
@@ -4843,7 +5308,7 @@ async function loadChatHistory(opts) {
       state.messages = parsed;
       if (!background) hideLoading();
       if (!background || changed) {
-        renderMessages({ preserveScroll: background });
+        renderMessages({ preserveScroll: background, forceBottom });
       }
 
       // If a run was already in-flight before this page connected, keep polling
@@ -6503,6 +6968,8 @@ function finishStream(sessionKey) {
   const sk = sessionKey ?? state.sessionKey;
   const ss = state.streams.get(sk);
   clearWorkingSince(sk);
+  delete state.queueInFlightBySession[sk];
+  if (state.compactionInFlightBySession[sk]) setCompactionInFlight(sk, false);
   if (ss) {
     if (ss.compactTimer) clearTimeout(ss.compactTimer);
     if (ss.workingTimer) clearTimeout(ss.workingTimer);
@@ -6632,8 +7099,15 @@ function handleStreamEvent(payload) {
   if (!sessionKey || !state.streams.has(sessionKey)) {
     if (stream === "compaction" || eventState === "compacting") {
       const cPhase = str(payloadData?.phase);
+      const payloadTabKey = resolveTabKey(payload.sessionKey);
+      const targetTabKey = payloadTabKey || resolveTabKey(sessionKey) || (isActiveTab ? state.sessionKey : null);
+      const isEnd = cPhase === "end";
+      if (targetTabKey) {
+        setCompactionInFlight(targetTabKey, !isEnd);
+        if (isEnd) void loadCompactionCheckpoints(targetTabKey, { force: true });
+      }
       if (isActiveTab || !sessionKey) {
-        if (cPhase === "end") setTimeout(() => hideBanner(), 2000);
+        if (isEnd) setTimeout(() => hideBanner(), 2000);
         else showBanner("Compacting context...");
       }
     }
@@ -6782,8 +7256,15 @@ function handleStreamEvent(payload) {
       if (state.autoScrollPinned) scrollToBottom(true);
     }
   } else if (stream === "compaction" || eventState === "compacting") {
-    if (phase === "end") {
-      if (isActiveTab) setTimeout(() => hideBanner(), 2000);
+    const compactionEnded = phase === "end";
+    setCompactionInFlight(sessionKey, !compactionEnded);
+    if (compactionEnded) {
+      void loadCompactionCheckpoints(sessionKey, { force: true });
+      if (isActiveTab) {
+        renderTypingLabel(STATUS_FINISHING_UP, sessionKey);
+        ui.typingIndicator.classList.remove("oc-hidden");
+        setTimeout(() => hideBanner(), 2000);
+      }
     } else {
       ss.toolCalls.push("Compacting memory");
       ss.items.push({
@@ -6796,7 +7277,8 @@ function handleStreamEvent(payload) {
       });
       if (isActiveTab) {
         appendToolCall("Compacting memory");
-        ui.typingIndicator.classList.add("oc-hidden");
+        renderTypingLabel("Compacting context", sessionKey);
+        ui.typingIndicator.classList.remove("oc-hidden");
         showBanner("Compacting context...");
       }
     }
@@ -6869,6 +7351,8 @@ function handleChatEvent(payload) {
   }
 
   if (!ss && (chatState === "final" || chatState === "aborted" || chatState === "error")) {
+    delete state.queueInFlightBySession[eventSessionKey];
+    setCompactionInFlight(eventSessionKey, false);
     const durationMs = estimateDurationMs();
     if (chatState === "final") recordWorkSummary(eventSessionKey, runId, durationMs, "completed");
     else if (chatState === "aborted") recordWorkSummary(eventSessionKey, runId, durationMs, "aborted");
@@ -7546,10 +8030,11 @@ function autoResize() {
 function handleSendOrQueue() {
   const text = ui.messageInput.value.trim();
   const hasDraftContent = !!text || state.pendingAttachments.length > 0;
+  const queueIntent = ui.sendBtn.classList.contains("stop-mode") && ui.sendBtn.classList.contains("queue-mode");
   const ss = state.streams.get(state.sessionKey);
   // Only treat as "streaming" if it's a user-initiated stream (not background/startup)
   let isStreaming = !!ss && !ss.background;
-  const isBusy = hasActiveRunInSession(state.sessionKey);
+  const isBusy = hasActiveRunInSession(state.sessionKey) || state.sending;
 
   // Safety: if stream exists but is stale, clean it up and show a clear timeout notice.
   if (isStreaming) {
@@ -7581,8 +8066,8 @@ function handleSendOrQueue() {
 
   if (!hasDraftContent) return;
 
-  // If this tab is currently busy, queue the message (with any attachments).
-  if (isStreaming || isBusy) {
+  // Queue explicitly when the button is in queue-mode, or implicitly when the tab is busy.
+  if (queueIntent || isStreaming || isBusy) {
     const queued = queueMessage(text, state.pendingAttachments.length > 0 ? cloneAttachmentDraftList(state.pendingAttachments) : null);
     if (!queued) return;
     ui.messageInput.value = '';
@@ -7593,6 +8078,8 @@ function handleSendOrQueue() {
       renderAttachPreview();
     }
     clearDraft(state.sessionKey);
+    // If the run flips idle quickly, proactively attempt a drain.
+    setTimeout(() => processQueue(state.sessionKey), 50);
     return;
   }
 
@@ -7740,7 +8227,7 @@ function setSendButtonStopMode(isStop) {
   }
 }
 
-// While a run is active: show "Add to Q" when composer has content, stop square when empty.
+// While a run is active: show "Add to Queue" when composer has content, stop square when empty.
 function updateStopSendIcon() {
   const btn = ui.sendBtn;
   if (!btn || !btn.classList.contains('stop-mode')) return;
@@ -7748,7 +8235,7 @@ function updateStopSendIcon() {
   btn.classList.remove('oc-opacity-low');
   if (hasComposerContent) {
     btn.classList.add('queue-mode');
-    btn.innerHTML = '<span class="oc-queue-label">Add to Q</span>';
+    btn.innerHTML = '<span class="oc-queue-label">Add to Queue</span>';
     btn.setAttribute('aria-label', 'Add to queue');
     btn.title = 'Add to queue';
   } else {
@@ -7958,7 +8445,7 @@ ui.tabBar.addEventListener("wheel", (e) => {
       animTarget.removeEventListener("transitionend", onEnd);
       resetSwipeStyles();
       if (commit && targetTab) {
-        switchTab(targetTab);
+        switchTab(targetTab, { forceBottom: true });
       }
     };
     animTarget.addEventListener("transitionend", onEnd);
@@ -8407,8 +8894,8 @@ function toggleSection(sectionId) {
   // Keep legacy key for compat
   localStorage.setItem('openSection', isOpen ? sectionId : '');
 
-  // Keep defaults/schedule panels in sync with gateway config if changed elsewhere.
-  if (isOpen && (sectionId === 'ai-model' || sectionId === 'schedule')) {
+  // Keep defaults/schedule/reliability panels in sync with gateway config if changed elsewhere.
+  if (isOpen && (sectionId === 'ai-model' || sectionId === 'schedule' || sectionId === 'reliability-defaults')) {
     refreshDefaultsIfSafe();
   }
 }
@@ -9070,21 +9557,46 @@ function normalizeIdleTimeoutSeconds(raw, fallback = DEFAULT_LLM_IDLE_TIMEOUT_SE
   return Math.max(MIN_LLM_IDLE_TIMEOUT_SECONDS, Math.min(MAX_EFFECTIVE_LLM_IDLE_TIMEOUT_SECONDS, Math.round(n)));
 }
 
-function buildIdleTimeoutOptions(currentSec) {
+function buildTimeoutOptions(currentSec, recommendedSec = RECOMMENDED_LLM_IDLE_TIMEOUT_SECONDS) {
   const normalizedCurrent = normalizeIdleTimeoutSeconds(currentSec);
-  const recommended = normalizeIdleTimeoutSeconds(RECOMMENDED_LLM_IDLE_TIMEOUT_SECONDS);
-
-  return [
-    { value: normalizedCurrent, label: `Current (${normalizedCurrent}s)` },
-    { value: recommended, label: `Recommended (${recommended}s)` },
+  const recommended = normalizeIdleTimeoutSeconds(recommendedSec);
+  const values = [
+    normalizedCurrent,
+    recommended,
+    ...TIMEOUT_PRESET_OPTIONS_SECONDS,
   ];
+
+  const seen = new Set();
+  const options = [];
+  for (const value of values) {
+    const normalized = normalizeIdleTimeoutSeconds(value, recommended);
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    let label = `${normalized}s`;
+    if (normalized % 60 === 0) {
+      const mins = normalized / 60;
+      label = `${mins}m (${normalized}s)`;
+    }
+    options.push({ value: normalized, label });
+  }
+
+  options.sort((a, b) => a.value - b.value);
+  if (!options.some((opt) => opt.value === normalizedCurrent)) {
+    options.unshift({ value: normalizedCurrent, label: `Current (${normalizedCurrent}s)` });
+  }
+
+  return options;
 }
 
 const RESET_IDLE_MINUTES_OPTIONS = [60, 120, 240, 480, 720, 1440, 2880, 10080];
 const MIN_LLM_IDLE_TIMEOUT_SECONDS = 60;
-const DEFAULT_LLM_IDLE_TIMEOUT_SECONDS = 120;
-const RECOMMENDED_LLM_IDLE_TIMEOUT_SECONDS = 120;
-const MAX_EFFECTIVE_LLM_IDLE_TIMEOUT_SECONDS = 120;
+const DEFAULT_LLM_IDLE_TIMEOUT_SECONDS = 600;
+const DEFAULT_AGENT_TIMEOUT_SECONDS = 1800;
+const RECOMMENDED_LLM_IDLE_TIMEOUT_SECONDS = 600;
+const RECOMMENDED_AGENT_TIMEOUT_SECONDS = 1800;
+const MAX_EFFECTIVE_LLM_IDLE_TIMEOUT_SECONDS = 1800;
+const TIMEOUT_PRESET_OPTIONS_SECONDS = [120, 300, 600, 900, 1200, 1800];
+const LLM_IDLE_TIMEOUT_STORAGE_KEY = "clawtabs.llmIdleTimeoutSeconds";
 const HEARTBEAT_OPTIONS = [
   { value: "0m", label: "off" },
   { value: "30m", label: "30 min" },
@@ -9092,6 +9604,25 @@ const HEARTBEAT_OPTIONS = [
   { value: "2h", label: "2 hours" },
   { value: "4h", label: "4 hours" },
 ];
+
+const RECOMMENDED_RELIABILITY_DEFAULTS = {
+  contextInjection: "continuation-skip",
+  contextPruning: {
+    mode: "cache-ttl",
+    ttl: "15m",
+    keepLastAssistants: 4,
+    softTrimRatio: 0.3,
+    hardClearRatio: 0.5,
+    minPrunableToolChars: 50000,
+    softTrim: { maxChars: 4000, headChars: 1500, tailChars: 1500 },
+    hardClear: { enabled: true, placeholder: "[Old tool result content cleared]" },
+  },
+  compaction: {
+    midTurnPrecheck: { enabled: true },
+    truncateAfterCompaction: true,
+    maxActiveTranscriptBytes: "12mb",
+  },
+};
 
 // ─── AI Model panel (requires session reset) ────────────────────────
 function updateDefaultsPanel() {
@@ -9115,15 +9646,6 @@ function updateDefaultsPanel() {
   const fallbackDisplay = effectiveFallbacks.length
     ? effectiveFallbacks.map(shortModelName).join(" → ")
     : "none";
-  const pendingIdleTimeoutRaw = Number(state.pendingDefaults.llmIdleTimeoutSeconds);
-  const defaultIdleTimeoutRaw = Number(d.llmIdleTimeoutSeconds);
-  const currentIdleTimeout = normalizeIdleTimeoutSeconds(
-    Number.isFinite(pendingIdleTimeoutRaw)
-      ? Math.round(pendingIdleTimeoutRaw)
-      : (Number.isFinite(defaultIdleTimeoutRaw) ? Math.round(defaultIdleTimeoutRaw) : DEFAULT_LLM_IDLE_TIMEOUT_SECONDS),
-    DEFAULT_LLM_IDLE_TIMEOUT_SECONDS
-  );
-  const idleTimeoutPending = "llmIdleTimeoutSeconds" in state.pendingDefaults;
 
   function renderSelect(key, label) {
     const isPending = key in state.pendingDefaults;
@@ -9141,25 +9663,6 @@ function updateDefaultsPanel() {
     '</div>';
   }
 
-  function renderIdleTimeoutSelect() {
-    const cls = idleTimeoutPending ? ' hud-defaults-pending' : '';
-    const options = buildIdleTimeoutOptions(currentIdleTimeout);
-    let selectedSet = false;
-    const optionsHtml = options.map(opt => {
-      let selected = '';
-      if (!selectedSet && Number(opt.value) === Number(currentIdleTimeout)) {
-        selected = ' selected';
-        selectedSet = true;
-      }
-      return '<option value="' + opt.value + '"' + selected + '>' + opt.label + '</option>';
-    }).join('');
-
-    return '<div class="hud-defaults-row">' +
-      '<span class="hud-defaults-label">Idle timeout</span>' +
-      '<select class="hud-defaults-select" data-default-key="llmIdleTimeoutSeconds"' + cls + '>' + optionsHtml + '</select>' +
-    '</div>';
-  }
-
   let html =
     '<div class="hud-defaults-row">' +
       '<span class="hud-defaults-label">Model</span>' +
@@ -9169,7 +9672,6 @@ function updateDefaultsPanel() {
       '<span class="hud-defaults-label">Fallbacks</span>' +
       '<span class="hud-defaults-value hud-defaults-editable' + (fallbacksPending ? ' hud-defaults-pending' : '') + '" id="hud-default-fallbacks">' + fallbackDisplay + '</span>' +
     '</div>' +
-    renderIdleTimeoutSelect() +
     renderSelect("thinking", "Thinking Effort") +
     renderSelect("verbose", "Show Steps");
 
@@ -9178,7 +9680,10 @@ function updateDefaultsPanel() {
     ? 'Changes are staged. Click Save to apply. Applies to new tabs. Current tab keeps its existing settings.'
     : 'Defaults are saved. Applies to new tabs. Current tab keeps its existing settings.';
 
-  html += '<div style="margin-top:6px;font-size:11px;line-height:1.35;color:var(--text-muted);opacity:0.85">' + statusLine + ' Model idle timeout applies after save/restart. Non-cron runs cap at 120s.</div>';
+  html += '<div style="margin-top:6px;font-size:11px;line-height:1.35;color:var(--text-muted);opacity:0.85">' +
+    statusLine +
+    ' Model + fallback + reasoning defaults only.' +
+    '</div>';
 
   if (hasPending) {
     html += '<button class="hud-defaults-apply" id="hud-defaults-apply" onclick="applyPendingDefaults()">Save</button>';
@@ -9240,7 +9745,7 @@ function updateDefaultsPanel() {
   el.querySelectorAll('.hud-defaults-select').forEach(sel => {
     sel.addEventListener('change', () => {
       const key = sel.dataset.defaultKey;
-      const numericKeys = new Set(["llmIdleTimeoutSeconds"]);
+      const numericKeys = new Set();
       const val = numericKeys.has(key) ? Number(sel.value) : sel.value;
       const cur = state.defaults[key];
       const same = numericKeys.has(key)
@@ -9259,7 +9764,238 @@ function updateDefaultsPanel() {
 }
 
 function hasModelPending() {
-  return ["model", "fallbacks", "thinking", "verbose", "llmIdleTimeoutSeconds"].some(k => k in state.pendingDefaults);
+  return ["model", "fallbacks", "thinking", "verbose"].some(k => k in state.pendingDefaults);
+}
+
+function hasTimeoutPending() {
+  return ["agentTimeoutSeconds", "llmIdleTimeoutSeconds"].some(k => k in state.pendingDefaults);
+}
+
+function updateReliabilityPanel() {
+  const el = document.getElementById("hud-reliability-panel");
+  if (!el) return;
+
+  const d = state.defaults || {};
+  const rec = RECOMMENDED_RELIABILITY_DEFAULTS;
+
+  const contextInjectionOn = String(d.contextInjection || "always") === rec.contextInjection;
+  const contextPruningOn = String(d.contextPruningMode || "off") === rec.contextPruning.mode;
+  const midTurnOn = d.compactionMidTurnPrecheck === true;
+  const truncateOn = d.compactionTruncateAfterCompaction === true;
+  const maxTranscriptOn = String(d.compactionMaxActiveTranscriptBytes || "") === rec.compaction.maxActiveTranscriptBytes;
+  const pendingAgentTimeoutRaw = Number(state.pendingDefaults.agentTimeoutSeconds);
+  const defaultAgentTimeoutRaw = Number(d.agentTimeoutSeconds);
+  const currentAgentTimeout = normalizeIdleTimeoutSeconds(
+    Number.isFinite(pendingAgentTimeoutRaw)
+      ? Math.round(pendingAgentTimeoutRaw)
+      : (Number.isFinite(defaultAgentTimeoutRaw) ? Math.round(defaultAgentTimeoutRaw) : DEFAULT_AGENT_TIMEOUT_SECONDS),
+    DEFAULT_AGENT_TIMEOUT_SECONDS
+  );
+  const agentTimeoutPending = "agentTimeoutSeconds" in state.pendingDefaults;
+
+  const pendingIdleTimeoutRaw = Number(state.pendingDefaults.llmIdleTimeoutSeconds);
+  const defaultIdleTimeoutRaw = Number(d.llmIdleTimeoutSeconds);
+  const currentIdleTimeout = normalizeIdleTimeoutSeconds(
+    Number.isFinite(pendingIdleTimeoutRaw)
+      ? Math.round(pendingIdleTimeoutRaw)
+      : (Number.isFinite(defaultIdleTimeoutRaw) ? Math.round(defaultIdleTimeoutRaw) : DEFAULT_LLM_IDLE_TIMEOUT_SECONDS),
+    DEFAULT_LLM_IDLE_TIMEOUT_SECONDS
+  );
+  const idleTimeoutPending = "llmIdleTimeoutSeconds" in state.pendingDefaults;
+
+  function renderTimeoutSelect(key, label, currentSec, pending, recommendedSec) {
+    const cls = pending ? ' hud-defaults-pending' : '';
+    const options = buildTimeoutOptions(currentSec, recommendedSec);
+    let selectedSet = false;
+    const optionsHtml = options.map(opt => {
+      let selected = '';
+      if (!selectedSet && Number(opt.value) === Number(currentSec)) {
+        selected = ' selected';
+        selectedSet = true;
+      }
+      return '<option value="' + opt.value + '"' + selected + '>' + opt.label + '</option>';
+    }).join('');
+
+    return '<div class="hud-defaults-row">' +
+      '<span class="hud-defaults-label">' + label + '</span>' +
+      '<select class="hud-defaults-select hud-reliability-timeout-select' + cls + '" data-default-key="' + key + '">' + optionsHtml + '</select>' +
+    '</div>';
+  }
+
+  function renderReliabilityToggle(id, label, checked, hint = "") {
+    return '<div class="hud-defaults-row">' +
+      '<span class="hud-defaults-label" title="' + escapeHtmlChat(hint || label) + '">' + escapeHtmlChat(label) + '</span>' +
+      '<label class="hud-toggle">' +
+        '<input type="checkbox" class="hud-reliability-toggle" id="' + id + '"' + (checked ? ' checked' : '') + '>' +
+        '<span class="hud-toggle-track"></span>' +
+      '</label>' +
+    '</div>';
+  }
+
+  let html =
+    renderReliabilityToggle('rel-context-injection', 'Bootstrap injection', contextInjectionOn, 'Recommended ON: continuation-skip') +
+    renderReliabilityToggle('rel-context-pruning', 'Tool-result pruning', contextPruningOn, 'Recommended ON: cache-ttl') +
+    '<div class="hud-defaults-row">' +
+      '<span class="hud-defaults-label">Pruning TTL</span>' +
+      '<select class="hud-defaults-select" id="rel-pruning-ttl"' + (contextPruningOn ? '' : ' disabled') + '>' +
+        ['5m','10m','15m','30m','1h'].map(v => '<option value="' + v + '"' + ((String(d.contextPruningTtl || rec.contextPruning.ttl) === v) ? ' selected' : '') + '>' + v + '</option>').join('') +
+      '</select>' +
+    '</div>' +
+    renderReliabilityToggle('rel-midturn-precheck', 'Mid-turn overflow precheck', midTurnOn, 'Recommended ON') +
+    renderReliabilityToggle('rel-truncate', 'Transcript shrink after compaction', truncateOn, 'Recommended ON') +
+    renderReliabilityToggle('rel-max-transcript', 'Compaction auto-threshold', maxTranscriptOn, 'Recommended ON: 12mb');
+
+  html += '<div style="margin-top:6px;font-size:11px;line-height:1.35;color:var(--text-muted);opacity:0.85">' +
+    'These settings reduce overflow retries in long tool-heavy sessions.' +
+    '</div>';
+
+  html += '<div class="hud-settings-divider" style="margin:6px 0"></div>' +
+    renderTimeoutSelect("agentTimeoutSeconds", "Run timeout", currentAgentTimeout, agentTimeoutPending, RECOMMENDED_AGENT_TIMEOUT_SECONDS) +
+    renderTimeoutSelect("llmIdleTimeoutSeconds", "Idle watchdog", currentIdleTimeout, idleTimeoutPending, RECOMMENDED_LLM_IDLE_TIMEOUT_SECONDS);
+
+  if (agentTimeoutPending || idleTimeoutPending) {
+    html += '<button class="hud-defaults-apply" id="hud-reliability-timeout-save" onclick="applyTimeoutDefaults()">save timeout defaults</button>';
+  }
+
+  html += '<button class="hud-defaults-apply" id="hud-reliability-save" onclick="applyReliabilitySettingsFromPanel()">save reliability settings</button>';
+  html += '<button class="hud-defaults-apply" id="hud-reliability-apply" onclick="applyRecommendedReliabilityDefaults()">apply recommended</button>';
+
+  el.innerHTML = html;
+
+  const relPruningToggle = document.getElementById('rel-context-pruning');
+  const relPruningTtl = document.getElementById('rel-pruning-ttl');
+  if (relPruningToggle && relPruningTtl) {
+    relPruningToggle.addEventListener('change', () => {
+      relPruningTtl.disabled = !relPruningToggle.checked;
+    });
+  }
+
+  el.querySelectorAll('.hud-reliability-timeout-select').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const key = sel.dataset.defaultKey;
+      const val = Number(sel.value);
+      const cur = Number(state.defaults[key]);
+      const same = Number(val) === Number(cur);
+
+      if (same) {
+        delete state.pendingDefaults[key];
+      } else {
+        state.pendingDefaults[key] = val;
+      }
+
+      updateReliabilityPanel();
+      updateDefaultsPanel();
+      updateBarControls();
+    });
+  });
+}
+
+async function applyReliabilitySettingsFromPanel() {
+  if (!state.gateway?.connected) return;
+  const applyBtn = document.getElementById("hud-reliability-save");
+  if (applyBtn) {
+    applyBtn.disabled = true;
+    applyBtn.textContent = "saving…";
+  }
+
+  try {
+    const getResult = await state.gateway.request("config.get", {});
+    const hash = getResult?.hash || "";
+
+    const contextInjectionOn = !!document.getElementById('rel-context-injection')?.checked;
+    const contextPruningOn = !!document.getElementById('rel-context-pruning')?.checked;
+    const pruningTtl = String(document.getElementById('rel-pruning-ttl')?.value || RECOMMENDED_RELIABILITY_DEFAULTS.contextPruning.ttl);
+    const midTurnOn = !!document.getElementById('rel-midturn-precheck')?.checked;
+    const truncateOn = !!document.getElementById('rel-truncate')?.checked;
+    const maxTranscriptOn = !!document.getElementById('rel-max-transcript')?.checked;
+
+    const contextPruningPatch = contextPruningOn
+      ? { ...RECOMMENDED_RELIABILITY_DEFAULTS.contextPruning, ttl: pruningTtl }
+      : { mode: "off" };
+
+    const compactionPatch = {
+      midTurnPrecheck: { enabled: midTurnOn },
+      truncateAfterCompaction: truncateOn,
+      maxActiveTranscriptBytes: maxTranscriptOn ? RECOMMENDED_RELIABILITY_DEFAULTS.compaction.maxActiveTranscriptBytes : null,
+    };
+
+    const rawPatch = {
+      agents: {
+        defaults: {
+          contextInjection: contextInjectionOn ? RECOMMENDED_RELIABILITY_DEFAULTS.contextInjection : "always",
+          contextPruning: contextPruningPatch,
+          compaction: compactionPatch,
+        },
+      },
+    };
+
+    state.gatewayRestarting = true;
+    await state.gateway.request("config.patch", { raw: JSON.stringify(rawPatch), baseHash: hash });
+
+    state.defaults.contextInjection = contextInjectionOn ? RECOMMENDED_RELIABILITY_DEFAULTS.contextInjection : "always";
+    state.defaults.contextPruningMode = contextPruningOn ? "cache-ttl" : "off";
+    state.defaults.contextPruningTtl = contextPruningOn ? pruningTtl : "";
+    state.defaults.compactionMidTurnPrecheck = midTurnOn;
+    state.defaults.compactionTruncateAfterCompaction = truncateOn;
+    state.defaults.compactionMaxActiveTranscriptBytes = maxTranscriptOn ? RECOMMENDED_RELIABILITY_DEFAULTS.compaction.maxActiveTranscriptBytes : "";
+
+    setTimeout(() => { state.gatewayRestarting = false; }, 2000);
+    updateReliabilityPanel();
+    showBanner("Reliability settings saved");
+  } catch (err) {
+    state.gatewayRestarting = false;
+    console.warn("Failed to save reliability settings:", err);
+    if (applyBtn) {
+      applyBtn.disabled = false;
+      applyBtn.textContent = "save reliability settings";
+    }
+  }
+}
+
+async function applyRecommendedReliabilityDefaults() {
+  if (!state.gateway?.connected) return;
+  const applyBtn = document.getElementById("hud-reliability-apply");
+  if (applyBtn) {
+    applyBtn.disabled = true;
+    applyBtn.textContent = "saving…";
+  }
+
+  try {
+    const getResult = await state.gateway.request("config.get", {});
+    const hash = getResult?.hash || "";
+    const rec = RECOMMENDED_RELIABILITY_DEFAULTS;
+
+    const rawPatch = {
+      agents: {
+        defaults: {
+          contextInjection: rec.contextInjection,
+          contextPruning: rec.contextPruning,
+          compaction: rec.compaction,
+        },
+      },
+    };
+
+    state.gatewayRestarting = true;
+    await state.gateway.request("config.patch", { raw: JSON.stringify(rawPatch), baseHash: hash });
+
+    state.defaults.contextInjection = rec.contextInjection;
+    state.defaults.contextPruningMode = rec.contextPruning.mode;
+    state.defaults.contextPruningTtl = rec.contextPruning.ttl;
+    state.defaults.compactionMidTurnPrecheck = true;
+    state.defaults.compactionTruncateAfterCompaction = true;
+    state.defaults.compactionMaxActiveTranscriptBytes = rec.compaction.maxActiveTranscriptBytes;
+
+    setTimeout(() => { state.gatewayRestarting = false; }, 2000);
+    updateReliabilityPanel();
+    showBanner("Recommended reliability defaults applied");
+  } catch (err) {
+    state.gatewayRestarting = false;
+    console.warn("Failed to apply reliability defaults:", err);
+    if (applyBtn) {
+      applyBtn.disabled = false;
+      applyBtn.textContent = "apply recommended";
+    }
+  }
 }
 
 // ─── Schedule panel (reset + heartbeat) ──────────────────────────────
@@ -9435,7 +10171,7 @@ async function applyScheduleChanges() {
 }
 
 function hasPendingDefaults() {
-  return hasModelPending() || hasSchedulePending();
+  return hasModelPending() || hasTimeoutPending() || hasSchedulePending();
 }
 
 async function applyPendingDefaults() {
@@ -9461,12 +10197,6 @@ async function applyPendingDefaults() {
       if (configKeys[key]) agentDefaultsPatch[configKeys[key]] = val || null;
     }
 
-    if ("llmIdleTimeoutSeconds" in state.pendingDefaults) {
-      const rawSecs = Number(state.pendingDefaults.llmIdleTimeoutSeconds);
-      const idleTimeoutSeconds = normalizeIdleTimeoutSeconds(rawSecs, RECOMMENDED_LLM_IDLE_TIMEOUT_SECONDS);
-      agentDefaultsPatch.timeoutSeconds = idleTimeoutSeconds;
-    }
-
     if (state.pendingDefaults.model || ("fallbacks" in state.pendingDefaults)) {
       const nextPrimary = state.pendingDefaults.model || state.defaults.model || "";
       const nextFallbacks = normalizeFallbacks(
@@ -9480,6 +10210,9 @@ async function applyPendingDefaults() {
     }
 
     if (Object.keys(agentDefaultsPatch).length === 0) {
+      updateDefaultsPanel();
+      updateReliabilityPanel();
+      updateBarControls();
       if (applyBtn) { applyBtn.disabled = false; applyBtn.textContent = "save"; }
       return;
     }
@@ -9489,7 +10222,7 @@ async function applyPendingDefaults() {
     await state.gateway.request("config.patch", { raw, baseHash: hash });
 
     // Update local state
-    for (const key of ["model", "fallbacks", "thinking", "verbose", "llmIdleTimeoutSeconds"]) {
+    for (const key of ["model", "fallbacks", "thinking", "verbose"]) {
       if (key in state.pendingDefaults) {
         state.defaults[key] = state.pendingDefaults[key];
         delete state.pendingDefaults[key];
@@ -9505,6 +10238,7 @@ async function applyPendingDefaults() {
     await updateContextMeter();
     await renderTabs();
     updateDefaultsPanel();
+    updateReliabilityPanel();
     updateBarControls();
   } catch (err) {
     state.gatewayRestarting = false;
@@ -9513,6 +10247,53 @@ async function applyPendingDefaults() {
     if (applyBtn) {
       applyBtn.disabled = false;
       applyBtn.textContent = "save";
+    }
+  }
+}
+
+async function applyTimeoutDefaults() {
+  if (!hasTimeoutPending() || !state.gateway?.connected) return;
+
+  const applyBtn = document.getElementById("hud-reliability-timeout-save");
+  if (applyBtn) {
+    applyBtn.disabled = true;
+    applyBtn.textContent = "saving…";
+  }
+
+  try {
+    const getResult = await state.gateway.request("config.get", {});
+    const hash = getResult?.hash || "";
+
+    const rawSecs = Number(state.pendingDefaults.agentTimeoutSeconds ?? state.defaults.agentTimeoutSeconds);
+    const runTimeoutSeconds = normalizeIdleTimeoutSeconds(rawSecs, RECOMMENDED_AGENT_TIMEOUT_SECONDS);
+
+    const idleRawSecs = Number(state.pendingDefaults.llmIdleTimeoutSeconds ?? state.defaults.llmIdleTimeoutSeconds);
+    const idleTimeoutSeconds = normalizeIdleTimeoutSeconds(idleRawSecs, RECOMMENDED_LLM_IDLE_TIMEOUT_SECONDS);
+
+    const raw = JSON.stringify({ agents: { defaults: { timeoutSeconds: runTimeoutSeconds } } });
+    state.gatewayRestarting = true;
+    await state.gateway.request("config.patch", { raw, baseHash: hash });
+
+    state.defaults.agentTimeoutSeconds = runTimeoutSeconds;
+    state.pendingDefaults.agentTimeoutSeconds = runTimeoutSeconds;
+    state.defaults.llmIdleTimeoutSeconds = idleTimeoutSeconds;
+    state.pendingDefaults.llmIdleTimeoutSeconds = idleTimeoutSeconds;
+    localStorage.setItem(LLM_IDLE_TIMEOUT_STORAGE_KEY, String(idleTimeoutSeconds));
+
+    delete state.pendingDefaults.agentTimeoutSeconds;
+    delete state.pendingDefaults.llmIdleTimeoutSeconds;
+
+    setTimeout(() => { state.gatewayRestarting = false; }, 2000);
+    updateDefaultsPanel();
+    updateReliabilityPanel();
+    updateBarControls();
+    showBanner("Timeout defaults saved");
+  } catch (err) {
+    state.gatewayRestarting = false;
+    console.warn("Failed to save timeout defaults:", err);
+    if (applyBtn) {
+      applyBtn.disabled = false;
+      applyBtn.textContent = "save timeout defaults";
     }
   }
 }

@@ -4166,6 +4166,144 @@ body.text-large .openclaw-tool-item { font-size: 12px; }
   line-height: 1;
 }
 
+.openclaw-model-bar #bar-compaction {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.openclaw-model-bar #bar-compaction.is-live {
+  color: var(--accent);
+  border-color: rgba(var(--accent-rgb), 0.35);
+  background: rgba(var(--accent-rgb), 0.08);
+}
+
+.openclaw-tab-compaction-badge,
+.oc-dd-compaction-badge {
+  border: 1px solid rgba(255,255,255,0.16);
+  background: rgba(255,255,255,0.06);
+  color: var(--text-faint);
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.openclaw-tab-compaction-badge:hover,
+.oc-dd-compaction-badge:hover {
+  color: var(--text-normal);
+  border-color: rgba(255,255,255,0.28);
+  background: rgba(255,255,255,0.12);
+}
+
+.oc-dd-compaction-badge {
+  margin-right: 4px;
+}
+
+.oc-compaction-panel {
+  min-width: 320px;
+  max-width: min(92vw, 460px);
+  display: grid;
+  gap: 8px;
+}
+
+.oc-compaction-topline {
+  font-size: 12px;
+  color: var(--text-faint);
+  padding: 0 8px;
+}
+
+.oc-compaction-topline.is-live {
+  color: var(--accent);
+}
+
+.oc-compaction-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--text-faint);
+  padding: 0 8px;
+}
+
+.oc-compaction-actions {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px;
+  padding: 0 2px;
+}
+
+.oc-compaction-action {
+  justify-content: center;
+  align-items: center;
+  flex-direction: row;
+  min-height: 30px;
+}
+
+.oc-compaction-error {
+  margin: 0 8px;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 92, 92, 0.3);
+  background: rgba(255, 92, 92, 0.08);
+  color: #ff9b9b;
+  font-size: 11px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.oc-compaction-list {
+  display: grid;
+  gap: 8px;
+  padding: 0 2px 2px;
+}
+
+.oc-compaction-item {
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 8px;
+  padding: 8px;
+  display: grid;
+  gap: 4px;
+  background: rgba(255,255,255,0.02);
+}
+
+.oc-compaction-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.oc-compaction-when {
+  color: var(--text-faint);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.oc-compaction-tokens {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.oc-compaction-summary {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-normal);
+  white-space: pre-wrap;
+  max-height: 120px;
+  overflow: auto;
+}
+
+.oc-muted {
+  color: var(--text-faint);
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
 .oc-inline-menu {
   position: fixed;
   z-index: 12000;
