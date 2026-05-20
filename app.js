@@ -9887,19 +9887,22 @@ const RECOMMENDED_RELIABILITY_DEFAULTS = {
   contextInjection: "continuation-skip",
   contextPruning: {
     mode: "cache-ttl",
-    ttl: "10m",
-    keepLastAssistants: 3,
-    softTrimRatio: 0.3,
-    hardClearRatio: 0.5,
-    minPrunableToolChars: 30000,
-    softTrim: { maxChars: 4000, headChars: 1500, tailChars: 1500 },
+    ttl: "5m",
+    keepLastAssistants: 2,
+    softTrimRatio: 0.25,
+    hardClearRatio: 0.45,
+    minPrunableToolChars: 12000,
+    softTrim: { maxChars: 2500, headChars: 900, tailChars: 900 },
     hardClear: { enabled: true, placeholder: "[Old tool result content cleared]" },
   },
   compaction: {
     midTurnPrecheck: { enabled: true },
     truncateAfterCompaction: true,
-    maxActiveTranscriptBytes: "8mb",
-    reserveTokensFloor: 24000,
+    maxActiveTranscriptBytes: "4mb",
+    reserveTokensFloor: 40000,
+    keepRecentTokens: 20000,
+    timeoutSeconds: 900,
+    notifyUser: true,
   },
 };
 
@@ -10127,7 +10130,7 @@ function updateReliabilityPanel() {
     renderReliabilityToggle('rel-reserve-floor', 'Reserve tokens floor', reserveFloorOn, `Recommended ON: ${Number(rec.compaction.reserveTokensFloor || 0).toLocaleString()} tokens`);
 
   html += '<div style="margin-top:6px;font-size:11px;line-height:1.35;color:var(--text-muted);opacity:0.85">' +
-    'These settings proactively compact and trim tool-heavy sessions to reduce overflow retries.' +
+    'Recommended mode prunes tool-heavy context sooner and compacts before sessions hit overflow.' +
     '</div>';
 
   html += '<div class="hud-settings-divider" style="margin:6px 0"></div>' +
@@ -10200,6 +10203,9 @@ async function applyReliabilitySettingsFromPanel() {
       truncateAfterCompaction: truncateOn,
       maxActiveTranscriptBytes: maxTranscriptOn ? RECOMMENDED_RELIABILITY_DEFAULTS.compaction.maxActiveTranscriptBytes : null,
       reserveTokensFloor: reserveFloorOn ? Number(RECOMMENDED_RELIABILITY_DEFAULTS.compaction.reserveTokensFloor || 0) : null,
+      keepRecentTokens: RECOMMENDED_RELIABILITY_DEFAULTS.compaction.keepRecentTokens,
+      timeoutSeconds: RECOMMENDED_RELIABILITY_DEFAULTS.compaction.timeoutSeconds,
+      notifyUser: true,
     };
 
     const rawPatch = {
