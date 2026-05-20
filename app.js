@@ -5191,14 +5191,17 @@ async function loadChatHistory(opts) {
     // Transcript-first: remember toolCall metadata by call id so corresponding
     // toolResult rows can reuse the exact label/args from the same run.
     const toolCallMetaById = new Map();
+    const isCompactionHistoryEntry = (m) => (
+      m?.type === "compaction" || m?.__openclaw?.kind === "compaction"
+    );
 
     let parsed = messages
-      .filter(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult" || m.type === "compaction")
+      .filter(m => isCompactionHistoryEntry(m) || m.role === "user" || m.role === "assistant" || m.role === "toolResult")
       .map(m => {
-        if (m?.type === "compaction") {
+        if (isCompactionHistoryEntry(m)) {
           const details = (m?.details && typeof m.details === "object") ? m.details : {};
-          const before = Number(details?.tokensBefore);
-          const after = Number(details?.tokensAfter);
+          const before = Number(details?.tokensBefore ?? m?.tokensBefore);
+          const after = Number(details?.tokensAfter ?? m?.tokensAfter);
           const reason = str(details?.reason, str(m?.reason));
           const stampRaw = m?.timestamp;
           let ts = Number(stampRaw);
@@ -5211,6 +5214,7 @@ async function loadChatHistory(opts) {
             role: "compaction",
             reason,
             summary: str(m?.summary),
+            checkpointId: str(m?.__openclaw?.id, str(m?.id)),
             tokensBefore: Number.isFinite(before) ? before : null,
             tokensAfter: Number.isFinite(after) ? after : null,
             timestamp: ts,
@@ -6067,10 +6071,27 @@ function appendCompactionMarker(msg) {
   const sub = document.createElement("div");
   sub.className = "openclaw-compaction-sub";
   const reason = str(msg?.reason).trim();
-  sub.textContent = reason
-    ? `Compaction: ${compactionReasonLabel(reason)} · ${cronTimeAgo(Number(msg?.timestamp || 0))}`
-    : `Conversation compacted · ${cronTimeAgo(Number(msg?.timestamp || 0))}`;
+  sub.textContent = "Earlier turns are preserved in a compaction checkpoint. Open session checkpoints to branch or restore that pre-compaction view.";
   wrap.appendChild(sub);
+
+  const metaParts = [];
+  if (reason) metaParts.push(compactionReasonLabel(reason));
+  const before = Number(msg?.tokensBefore);
+  const after = Number(msg?.tokensAfter);
+  const compactTokenNumber = (n) => Number(n).toLocaleString();
+  if (Number.isFinite(before) && before > 0) {
+    metaParts.push(Number.isFinite(after) && after > 0
+      ? `${compactTokenNumber(after)} / ${compactTokenNumber(before)} tokens kept`
+      : `${compactTokenNumber(before)} tokens before compaction`);
+  }
+  const rel = cronTimeAgo(Number(msg?.timestamp || 0));
+  if (rel) metaParts.push(rel);
+  if (metaParts.length > 0) {
+    const meta = document.createElement("div");
+    meta.className = "openclaw-compaction-meta";
+    meta.textContent = metaParts.join(" · ");
+    wrap.appendChild(meta);
+  }
 
   const btn = document.createElement("button");
   btn.className = "openclaw-compaction-btn";

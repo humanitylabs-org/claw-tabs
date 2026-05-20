@@ -4235,6 +4235,12 @@ body.text-large .openclaw-tool-item { font-size: 12px; }
   margin-top: 4px;
 }
 
+.openclaw-compaction-meta {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-top: 6px;
+}
+
 .openclaw-compaction-btn {
   margin-top: 8px;
   border: 1px solid rgba(255,255,255,0.16);
