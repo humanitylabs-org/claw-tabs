@@ -4224,10 +4224,11 @@ body.text-large .openclaw-tool-item { font-size: 12px; }
 }
 
 .openclaw-compaction-label {
-  font-size: 10px;
-  letter-spacing: 0.08em;
+  font-size: 12px;
+  letter-spacing: 0.02em;
   font-weight: 600;
-  color: var(--text-faint);
+  color: var(--text-muted);
+  text-transform: none;
 }
 
 .openclaw-compaction-sub {

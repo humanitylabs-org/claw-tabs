@@ -6073,13 +6073,13 @@ function appendCompactionMarker(msg) {
 
   const label = document.createElement("div");
   label.className = "openclaw-compaction-label";
-  label.textContent = "COMPACTED HISTORY";
+  label.textContent = "Memory compressed";
   wrap.appendChild(label);
 
   const sub = document.createElement("div");
   sub.className = "openclaw-compaction-sub";
   const reason = str(msg?.reason).trim();
-  sub.textContent = "Earlier turns are preserved in a compaction checkpoint. Open session checkpoints to branch or restore that pre-compaction view.";
+  sub.textContent = "Older messages were summarized so this tab can keep going.";
   wrap.appendChild(sub);
 
   const metaParts = [];
@@ -6104,8 +6104,8 @@ function appendCompactionMarker(msg) {
   const btn = document.createElement("button");
   btn.className = "openclaw-compaction-btn";
   btn.type = "button";
-  btn.textContent = "Open checkpoints";
-  btn.addEventListener("click", () => openCompactionPanelAtAnchor(btn, state.sessionKey || "main"));
+  btn.textContent = "Show saved checkpoints";
+  btn.addEventListener("click", () => openCompactionPanel(btn, state.sessionKey || "main"));
   wrap.appendChild(btn);
 
   ui.messagesContainer.appendChild(wrap);
