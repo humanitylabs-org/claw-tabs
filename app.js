@@ -5393,6 +5393,24 @@ async function loadChatHistory(opts) {
       delete state.queueInFlightBySession[targetKey];
     }
 
+    // Recover from ghost "working" UI after event gaps:
+    // transcript says done, but local stream object can remain and block next send.
+    if (!maybeInFlight && state.streams.has(targetKey)) {
+      const lingering = state.streams.get(targetKey);
+      const lingerStartedAt = normalizeEpochMs(lingering?.startedAtMs);
+      const lingerLastSignal = latestStreamSignalMs(lingering);
+      const lingerSilentMs = lingerLastSignal ? (Date.now() - lingerLastSignal) : 0;
+      const hasRecentAssistant = Array.isArray(parsed) && parsed.some((m) =>
+        m?.role === "assistant"
+        && !isReasoningAssistantMessage(m)
+        && Number(m?.timestamp || 0) >= (lingerStartedAt || 0)
+      );
+
+      if (hasRecentAssistant || lingerSilentMs > 6000) {
+        finishStream(targetKey);
+      }
+    }
+
     const previous = (targetKey === state.sessionKey)
       ? state.messages
       : (state.tabCache[targetKey]?.messages || []);
@@ -7337,6 +7355,7 @@ function handleStreamEvent(payload) {
             recoveryInFlight: false,
             stalledAtMs: 0,
             background: true,
+            syntheticCompactionOnly: true,
           };
           state.streams.set(targetTabKey, ss);
           if (runId) state.runToSession.set(runId, targetTabKey);
@@ -7463,6 +7482,18 @@ function handleStreamEvent(payload) {
         ui.typingIndicator.classList.remove("oc-hidden");
         setTimeout(() => hideBanner(), 2000);
       }
+
+      // Compaction events can be emitted as standalone background streams.
+      // If that synthetic stream doesn't get a later lifecycle final event,
+      // it can leave the UI stuck in "working" forever.
+      if (ss?.background && ss?.syntheticCompactionOnly) {
+        setTimeout(() => {
+          const current = state.streams.get(sessionKey);
+          if (current?.background && current?.syntheticCompactionOnly) {
+            finishStream(sessionKey);
+          }
+        }, 250);
+      }
       return;
     }
 
@@ -7495,6 +7526,9 @@ function handleStreamEvent(payload) {
     }
     return;
   }
+
+  // Any non-compaction event means this is a normal run now.
+  if (ss?.syntheticCompactionOnly) ss.syntheticCompactionOnly = false;
 
   if (stream === "fallback" || (stream === "lifecycle" && (phase === "fallback" || phase === "fallback_cleared"))) {
     const label = fallbackStatusLabel(payloadData, phase);
