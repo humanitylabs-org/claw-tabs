@@ -5010,7 +5010,7 @@ function workSummaryMessagesForSession(sessionKey) {
   if (!key) return [];
   const list = Array.isArray(state.workSummaries?.[key]) ? state.workSummaries[key] : [];
   const valid = list
-    .filter((entry) => Number(entry?.ms || 0) > 0)
+    .filter((entry) => Number(entry?.ms || 0) > 0 && String(entry?.outcome || "").toLowerCase() !== "error")
     .sort((a, b) => (Number(a?.at || 0) - Number(b?.at || 0)));
   if (valid.length === 0) return [];
 
@@ -5939,6 +5939,12 @@ function renderMessages(opts = {}) {
   }
   ui.messagesContainer.innerHTML = "";
   state.streamEl = null;
+  const completedToolCallIds = new Set(
+    (state.messages || [])
+      .filter((m) => m?.role === "toolResult")
+      .map((m) => str(m?.toolCallId))
+      .filter(Boolean)
+  );
   let pendingUserSlashCommand = "";
   for (const msg of state.messages) {
     if (msg.role === "user") {
@@ -6031,6 +6037,8 @@ function renderMessages(opts = {}) {
             }
           } else if (block.type === "tool_use" || block.type === "toolCall") {
             if (shouldShowToolEvents()) {
+              const blockId = str(block.id, str(block.toolCallId));
+              if (blockId && completedToolCallIds.has(blockId)) continue;
               const { label, url } = buildToolLabel(block.name || "", block.input || block.arguments || {});
               appendToolCall(label, url, false, { noScroll: true });
             }
