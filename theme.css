@@ -5220,6 +5220,19 @@ body.theme-wallpaper #dashboard {
   color: var(--text-muted);
 }
 
+.openclaw-inline-typing {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 6px 12px;
+}
+
+.openclaw-inline-typing-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 /* Composer rhythm */
 .openclaw-input-row {
   min-height: 48px;

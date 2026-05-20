@@ -5900,6 +5900,29 @@ function hasActiveRunInSession(sessionKey = state.sessionKey) {
   return false;
 }
 
+function appendInlineTypingBubble() {
+  const activeKey = state.sessionKey;
+  if (!hasActiveRunInSession(activeKey)) return;
+
+  const ss = state.streams.get(activeKey);
+  if (ss?.text) return;
+
+  const bubble = document.createElement("div");
+  bubble.className = "openclaw-msg openclaw-msg-assistant openclaw-inline-typing";
+  bubble.id = "oc-inline-typing";
+
+  const row = document.createElement("div");
+  row.className = "openclaw-inline-typing-row";
+  for (let i = 0; i < 3; i++) {
+    const dot = document.createElement("span");
+    dot.className = "openclaw-dot";
+    row.appendChild(dot);
+  }
+
+  bubble.appendChild(row);
+  ui.messagesContainer.appendChild(bubble);
+}
+
 function renderMessages(opts = {}) {
   const forceBottom = !!opts.forceBottom;
   const prevTop = ui.messagesContainer.scrollTop;
@@ -6020,6 +6043,8 @@ function renderMessages(opts = {}) {
 
     appendMessage(msg);
   }
+
+  appendInlineTypingBubble();
 
   if (forceBottom || wasNearBottom) {
     scrollToBottom(true);
@@ -7145,6 +7170,7 @@ function updateStreamBubble() {
   const shouldStick = state.autoScrollPinned;
   const ss = state.streams.get(state.sessionKey);
   const visibleText = ss?.text;
+  document.getElementById("oc-inline-typing")?.remove();
   if (!visibleText) {
     if (state.streamEl) {
       state.streamEl.remove();
