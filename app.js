@@ -840,6 +840,16 @@ const state = {
   // Model
   currentModel: "",
   currentModelSetAt: 0,
+  modelContextWindows: {}, // fullId ("provider/id") -> contextWindow, populated from models.list
+  _modelCatalogPromise: null,
+  // Per-session last-call usage captured from chat "final" events:
+  // { [sessionKey]: { input, output, cacheRead, cacheWrite, ts } }
+  // Used to compute *active* context (input+cacheRead+cacheWrite) for the meter,
+  // since sessions.list only exposes cumulative totalTokens (which can read >window).
+  activeContextCache: (() => {
+    try { return JSON.parse(localStorage.getItem("clawtabs.activeContextCache") || "{}") || {}; }
+    catch { return {}; }
+  })(),
 
   // Session controls
   thinkingLevel: "",   // off|minimal|low|medium|high|xhigh
@@ -892,6 +902,12 @@ const state = {
   // Dock channel
   dockChannel: "",  // "" = webchat (here), "telegram", "discord", etc.
   availableChannels: [],
+
+  // Tab visibility by source (default: human ON, others OFF — preserves legacy behavior)
+  tabShowHuman: localStorage.getItem("tabShowHuman") !== "0",
+  tabShowSubagent: localStorage.getItem("tabShowSubagent") === "1",
+  tabShowCron: localStorage.getItem("tabShowCron") === "1",
+  tabShowSystem: localStorage.getItem("tabShowSystem") === "1",
 
   // Tabs
   tabSessions: [],
@@ -2198,7 +2214,6 @@ async function loadDefaults() {
     
     updateDefaultsPanel();
     updateReliabilityPanel();
-    updateSchedulePanel();
     updateBarControls();
     loadTTSSettings();
     
@@ -2440,7 +2455,8 @@ function renderMobileTabSwitcher() {
     };
   }
 
-  const meterTitle = contextMeterTitle(current.model, current.used, current.max, current.pctRaw ?? current.pct ?? 0);
+  const currentFullKey = agentPrefix() + current.key;
+  const meterTitle = contextMeterTitle(current.model, current.used, current.max, current.pctRaw ?? current.pct ?? 0, currentFullKey);
   if (meterFill) {
     meterFill.style.width = (current.pct || 0) + "%";
     meterFill.title = meterTitle;
@@ -2612,7 +2628,7 @@ function renderHamburgerDropdown() {
     const fill = document.createElement("div");
     fill.className = "oc-dd-meter-fill";
     fill.style.width = tab.pct + "%";
-    const meterTitle = contextMeterTitle(tab.model, tab.used, tab.max, tab.pctRaw ?? tab.pct ?? 0);
+    const meterTitle = contextMeterTitle(tab.model, tab.used, tab.max, tab.pctRaw ?? tab.pct ?? 0, agentPrefix() + tab.key);
     fill.title = meterTitle;
     meter.title = meterTitle;
     item.title = meterTitle;
@@ -2756,25 +2772,28 @@ async function _renderTabsInner() {
   const prefix = agentPrefix();
   const convSessions = sessions.filter(s => {
     if (!s.key.startsWith(prefix)) return false;
-    if (s.key.includes(":cron:")) return false;
-    if (s.key.includes(":subagent:")) return false;
-    const suffix = s.key.slice(prefix.length);
-    return !suffix.includes(":");
+    const bucket = classifyTabBucket(s, prefix);
+    if (bucket === "human" && !state.tabShowHuman) return false;
+    if (bucket === "subagent" && !state.tabShowSubagent) return false;
+    if (bucket === "cron" && !state.tabShowCron) return false;
+    if (bucket === "system" && !state.tabShowSystem) return false;
+    return true;
   });
 
   state.homeMirrorSessionKey = pickHomeMirrorSessionKey(sessions);
 
   state.tabSessions = [];
-  const mainSession = convSessions.find(s => s.key === `${prefix}main`);
+  // Home tab always shows, even when "human" bucket is toggled off — pull from full list.
+  const mainSession = sessions.find(s => s.key === `${prefix}main`);
   const homeSource = state.homeMirrorSessionKey
     ? sessions.find((s) => normalizeSessionKey(s.key) === state.homeMirrorSessionKey)
     : null;
   const homeSession = homeSource || mainSession;
   if (homeSession) {
     const used = homeSession.totalTokens || 0;
-    const max = homeSession.contextTokens || 200000;
+    const max = homeSession.contextTokens || defaultContextMax(homeSession.model || state.currentModel);
     const pctRaw = contextUsagePercentRaw(used, max);
-    const pct = contextUsagePercentFill(pctRaw);
+    const pct = meterFillPercentForSession(homeSession.key, pctRaw, max);
     state.tabSessions.push({
       key: "main",
       label: "Home",
@@ -2794,7 +2813,7 @@ async function _renderTabsInner() {
       pct: 0,
       pctRaw: 0,
       used: 0,
-      max: 200000,
+      max: defaultContextMax(state.currentModel),
       model: state.currentModel || "",
       compactionCount: 0,
       latestCompaction: null,
@@ -2854,9 +2873,9 @@ async function _renderTabsInner() {
   for (const s of others) {
     const sk = s.key.slice(prefix.length);
     const used = s.totalTokens || 0;
-    const max = s.contextTokens || 200000;
+    const max = s.contextTokens || defaultContextMax(s.model || state.currentModel);
     const pctRaw = contextUsagePercentRaw(used, max);
-    const pct = contextUsagePercentFill(pctRaw);
+    const pct = meterFillPercentForSession(s.key, pctRaw, max);
 
     let label = s.label || s.displayName || "";
     const renameMeta = state.tabRenameState?.[sk];
@@ -2888,7 +2907,7 @@ async function _renderTabsInner() {
       pct: 0,
       pctRaw: 0,
       used: 0,
-      max: 200000,
+      max: defaultContextMax(state.currentModel),
       model: "",
       compactionCount: 0,
       latestCompaction: null,
@@ -2961,7 +2980,7 @@ async function _renderTabsInner() {
 
     tabEl.appendChild(row);
 
-    const meterTitle = contextMeterTitle(tab.model, tab.used, tab.max, tab.pctRaw ?? tab.pct ?? 0);
+    const meterTitle = contextMeterTitle(tab.model, tab.used, tab.max, tab.pctRaw ?? tab.pct ?? 0, agentPrefix() + tab.key);
     tabEl.title = meterTitle;
 
     if (!isHome) {
@@ -3587,6 +3606,19 @@ async function updateContextMeter() {
     state.homeMirrorSessionKey = pickHomeMirrorSessionKey(sessions);
     const homeMirrorChanged = prevHomeMirror !== state.homeMirrorSessionKey;
     const optionsChanged = prevOptionsSig !== JSON.stringify(state.homePairOptions || []);
+
+    // Keep Tab Settings panel counts + home-pair chips in sync with polled sessions.
+    const sourceCounts = { human: 0, subagent: 0, cron: 0, system: 0 };
+    for (const s of sessions) {
+      const bucket = classifySessionSource(s);
+      if (bucket === "human") sourceCounts.human += 1;
+      else if (bucket === "subagent") sourceCounts.subagent += 1;
+      else if (bucket === "cron") sourceCounts.cron += 1;
+      else sourceCounts.system += 1;
+    }
+    state._sessionCount = sessions.length;
+    state._sessionBreakdown = { source: sourceCounts };
+    updateTabSettingsPanel();
     const sk = state.sessionKey || "main";
     const effectiveSk = resolveGatewaySessionKey(sk);
     const prefix = agentPrefix();
@@ -3644,11 +3676,11 @@ async function updateContextMeter() {
     const activeFill = ui.tabBar?.querySelector(".openclaw-tab.active .openclaw-tab-meter-fill");
     if (activeFill) {
       const used = session.totalTokens || 0;
-      const max = session.contextTokens || 200000;
+      const max = session.contextTokens || defaultContextMax(session.model || state.currentModel);
       const pctRaw = contextUsagePercentRaw(used, max);
-      const pct = contextUsagePercentFill(pctRaw);
+      const pct = meterFillPercentForSession(session.key, pctRaw, max);
       activeFill.style.width = pct + "%";
-      const meterTitle = contextMeterTitle(session.model || state.currentModel || "", used, max, pctRaw);
+      const meterTitle = contextMeterTitle(session.model || state.currentModel || "", used, max, pctRaw, session.key);
       activeFill.title = meterTitle;
       const activeMeter = activeFill.parentElement;
       if (activeMeter) activeMeter.title = meterTitle;
@@ -3753,15 +3785,123 @@ function contextUsagePercentFill(rawPct) {
   return Math.max(0, Math.min(100, raw));
 }
 
-function contextMeterTitle(model, used, max, pct) {
+function cacheModelCatalog(models) {
+  if (!Array.isArray(models)) return;
+  for (const m of models) {
+    if (m && m.provider && m.id && Number.isFinite(m.contextWindow) && m.contextWindow > 0) {
+      state.modelContextWindows[`${m.provider}/${m.id}`] = m.contextWindow;
+    }
+  }
+}
+
+async function ensureModelCatalog() {
+  if (state._modelCatalogPromise) return state._modelCatalogPromise;
+  if (!state.gateway?.connected) return null;
+  state._modelCatalogPromise = (async () => {
+    try {
+      const result = await state.gateway.request("models.list", {});
+      cacheModelCatalog(result?.models || []);
+    } catch {
+      state._modelCatalogPromise = null;
+    }
+  })();
+  return state._modelCatalogPromise;
+}
+
+function defaultContextMax(model) {
+  if (model && state.modelContextWindows[model]) return state.modelContextWindows[model];
+  return 200000;
+}
+
+// Capture the last-call usage from the chat final-event payload, persist for
+// later renders. The session payload only exposes cumulative totalTokens —
+// this gives us per-call input/cacheRead/cacheWrite so the meter can show
+// real active context (≤ window) instead of cumulative throughput (~999%).
+function captureLastCallUsage(sessionKey, msg) {
+  if (!sessionKey || !msg || typeof msg !== "object") return;
+  const u = msg.usage;
+  if (!u || typeof u !== "object") return;
+  const input = Number(u.input ?? u.inputTokens ?? u.input_tokens ?? 0);
+  const output = Number(u.output ?? u.outputTokens ?? u.output_tokens ?? 0);
+  const cacheRead = Number(u.cacheRead ?? u.cache_read_input_tokens ?? 0);
+  const cacheWrite = Number(u.cacheWrite ?? u.cache_creation_input_tokens ?? 0);
+  if (!Number.isFinite(input) || !Number.isFinite(output)
+      || !Number.isFinite(cacheRead) || !Number.isFinite(cacheWrite)) return;
+  if (input <= 0 && output <= 0 && cacheRead <= 0 && cacheWrite <= 0) return;
+  state.activeContextCache[sessionKey] = {
+    input: Math.max(0, input),
+    output: Math.max(0, output),
+    cacheRead: Math.max(0, cacheRead),
+    cacheWrite: Math.max(0, cacheWrite),
+    ts: Date.now(),
+  };
+  try {
+    localStorage.setItem("clawtabs.activeContextCache", JSON.stringify(state.activeContextCache));
+  } catch {}
+}
+
+// Returns { active, cachedPct } if we have streamed data for this session,
+// otherwise null. `active` is single-call prompt size (input+cacheRead+cacheWrite).
+function getActiveContextForSession(sessionKey) {
+  const u = state.activeContextCache?.[sessionKey];
+  if (!u) return null;
+  const active = (u.input || 0) + (u.cacheRead || 0) + (u.cacheWrite || 0);
+  if (active <= 0) return null;
+  const cachedPct = Math.round(((u.cacheRead || 0) / active) * 100);
+  return { active, cachedPct, ts: u.ts || 0 };
+}
+
+// Bar-fill percent for the tab meter: prefer active-context reading when we
+// have it (always ≤ 100), otherwise fall back to the cumulative pct (also
+// capped at 100 for the bar by contextUsagePercentFill).
+function meterFillPercentForSession(sessionKey, fallbackPct, max) {
+  const active = getActiveContextForSession(sessionKey);
+  if (active && max > 0) {
+    return Math.max(0, Math.min(100, Math.round((active.active / max) * 100)));
+  }
+  return contextUsagePercentFill(fallbackPct);
+}
+
+// Matches OpenClaw's gateway-side formatTokenCount (status-message)
+// so the meter prints "128k/1.0m" identically to /status output.
+function formatTokenCountShort(value) {
+  if (value === undefined || value === null || !Number.isFinite(Number(value))) return "0";
+  const safe = Math.max(0, Number(value));
+  if (safe >= 1e6) return `${(safe / 1e6).toFixed(1)}m`;
+  if (safe >= 1e3) {
+    const precision = safe >= 1e4 ? 0 : 1;
+    const formatted = (safe / 1e3).toFixed(precision);
+    if (Number(formatted) >= 1e3) return `${(safe / 1e6).toFixed(1)}m`;
+    return `${formatted}k`;
+  }
+  return String(Math.round(safe));
+}
+
+function contextMeterTitle(model, used, max, pct, sessionKey) {
   const modelName = shortModelName(model || "unknown");
   const usedSafe = Number.isFinite(Number(used)) ? Number(used) : 0;
   const maxSafe = Number.isFinite(Number(max)) ? Number(max) : 0;
-  const pctSafe = Number.isFinite(Number(pct)) ? Number(pct) : 0;
-  const ratio = maxSafe > 0
-    ? `${usedSafe.toLocaleString()} / ${maxSafe.toLocaleString()} (${pctSafe}%)`
-    : `${usedSafe.toLocaleString()} tokens`;
-  return `${modelName}\n${ratio}`;
+  if (maxSafe <= 0) return `${modelName}\n${formatTokenCountShort(usedSafe)} tokens`;
+
+  // Prefer active-context reading captured from chat final events:
+  // active = input + cacheRead + cacheWrite from the latest call. This is
+  // always ≤ window, unlike the cumulative session.totalTokens that can read
+  // many times the window after prompt-cache re-reads pile up.
+  const active = sessionKey ? getActiveContextForSession(sessionKey) : null;
+  if (active) {
+    const activePct = Math.round((active.active / maxSafe) * 100);
+    let body = `active ${formatTokenCountShort(active.active)}/${formatTokenCountShort(maxSafe)} (${activePct}%)`;
+    if (active.cachedPct >= 0) body += ` · ${active.cachedPct}% cached`;
+    if (usedSafe > active.active) {
+      body += `\nthroughput: ${formatTokenCountShort(usedSafe)} (cumulative across turns)`;
+    }
+    return `${modelName}\n${body}`;
+  }
+
+  // Fallback: no streamed usage data for this session yet — match /status
+  // format so users still see something comparable to Telegram/terminal.
+  const pctSafe = Number.isFinite(Number(pct)) ? Number(pct) : Math.round((usedSafe / maxSafe) * 100);
+  return `${modelName}\n${formatTokenCountShort(usedSafe)}/${formatTokenCountShort(maxSafe)} (${pctSafe}%)`;
 }
 
 function updateModelLabel() {
@@ -3830,23 +3970,9 @@ function updateBarControls() {
     stepsEl.classList.toggle("active", mode !== "off");
   }
 
-  if (homePairEl && homePairSep) {
-    const onHomeTab = (state.sessionKey || "main") === "main";
-    homePairEl.style.display = onHomeTab ? "" : "none";
-    homePairSep.style.display = onHomeTab ? "" : "none";
-    const paired = state.homeMirrorSessionKey;
-    if (!paired) {
-      homePairEl.textContent = "home: main";
-      homePairEl.classList.remove("active");
-      homePairEl.title = "Home is paired to Main session";
-    } else {
-      const opt = state.homePairOptions.find((o) => o.value === paired);
-      const label = (opt?.label || "Telegram").split("·")[0].trim();
-      homePairEl.textContent = `home: ${label.toLowerCase()}`;
-      homePairEl.classList.add("active");
-      homePairEl.title = `Home is paired to ${opt?.label || "Telegram"}`;
-    }
-  }
+  // Home pairing chip moved to the Tab Settings panel — keep hidden in the bottom bar.
+  if (homePairEl) homePairEl.style.display = "none";
+  if (homePairSep) homePairSep.style.display = "none";
 
   updateCompactionChip();
   updateReleaseBadge();
@@ -4391,6 +4517,7 @@ async function openModelPicker(opts = {}) {
     const result = await state.gateway?.request("models.list", {});
     models = result?.models || [];
   } catch { models = []; }
+  cacheModelCatalog(models);
 
   let currentModel = opts.current || state.currentModel || "";
   if (currentModel && !currentModel.includes("/")) {
@@ -4436,6 +4563,7 @@ async function openFallbackPicker(opts = {}) {
     const result = await state.gateway?.request("models.list", {});
     models = result?.models || [];
   } catch { models = []; }
+  cacheModelCatalog(models);
 
   const primaryModel = opts.primary || state.pendingDefaults.model || state.defaults.model || "";
   const selected = normalizeFallbacks(opts.current || [], primaryModel);
@@ -6161,7 +6289,20 @@ function appendAssistantTextContent(bubble, displayText, msg) {
 function looksLikeStatusCard(text) {
   const lines = str(text).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   if (lines.length < 3) return false;
+  if (/```/.test(str(text))) return false;
   const body = lines.slice(1);
+  const markdownish = body.some((line) => {
+    if (/^[-*]\s+/.test(line)) return true;
+    if (/^\d+[\.)]\s+/.test(line)) return true;
+    if (/^#{1,6}\s+/.test(line)) return true;
+    if (/^>\s+/.test(line)) return true;
+    if (/\|/.test(line)) return true;
+    if (/`/.test(line)) return true;
+    if (/\*\*|__|~~/.test(line)) return true;
+    if (/\[[^\]]+\]\([^)]+\)/.test(line)) return true;
+    return false;
+  });
+  if (markdownish) return false;
   const kvCount = body.filter((l) => /^[A-Za-z0-9_\-\/ ()]{2,32}:\s+.+/.test(l)).length;
   return kvCount >= 2 && kvCount >= Math.ceil(body.length * 0.5);
 }
@@ -6211,12 +6352,37 @@ function renderTtsStatusHtml(text) {
   return html;
 }
 
+// CLI/Obsidian clients save attachments to `.openclaw-cli-images/` and inject
+// `@/abs/path/to/file.jpg` into the message text. Webchat doesn't get the
+// attachment payload, so recover previews by scanning text for those refs.
+function extractAtPathImageRefs(text) {
+  if (!text) return [];
+  const refs = [];
+  const re = /@((?:~|\/|[a-zA-Z]:[\\/])[^\s<>"']+?\.(?:jpe?g|png|gif|webp|heic|heif|svg|bmp))(?=$|[\s,;!?)\]}])/gi;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    refs.push({ match: m[0], path: m[1] });
+  }
+  return refs;
+}
+
 function appendMessage(msg, opts = {}) {
   const suppressAudio = !!opts.suppressAudio;
   const cls = msg.role === "user" ? "openclaw-msg-user" : "openclaw-msg-assistant";
   const bubble = document.createElement("div");
   bubble.className = `openclaw-msg ${cls}`;
   if (msg.isWorkSummary) bubble.classList.add("openclaw-msg-work-summary");
+
+  let atPathStripMatches = null;
+  if (msg.role === "user" && (!msg.images || msg.images.length === 0)) {
+    const sourceText = typeof msg.text === "string" ? msg.text
+      : typeof msg.content === "string" ? msg.content : "";
+    const refs = extractAtPathImageRefs(sourceText);
+    if (refs.length > 0) {
+      msg.images = refs.map(r => r.path);
+      atPathStripMatches = refs.map(r => r.match);
+    }
+  }
 
   if (msg.images && msg.images.length > 0) {
     const imgContainer = document.createElement("div");
@@ -6227,6 +6393,15 @@ function appendMessage(msg, opts = {}) {
       img.className = "openclaw-msg-img";
       img.src = resolvedSrc;
       img.loading = "lazy";
+      img.addEventListener("error", () => {
+        // If the gateway can't serve the path, swap the image for a small chip
+        // so the user still sees a referenced-file marker instead of a broken icon.
+        const chip = document.createElement("span");
+        chip.className = "openclaw-attach-chip openclaw-attach-chip-missing";
+        chip.textContent = "📎 " + String(src).split(/[\\/]/).pop();
+        chip.title = String(src);
+        img.replaceWith(chip);
+      }, { once: true });
       img.addEventListener("click", () => {
         const overlay = document.createElement("div");
         overlay.className = "openclaw-img-overlay";
@@ -6256,6 +6431,13 @@ function appendMessage(msg, opts = {}) {
   }
 
   displayText = cleanText(displayText);
+
+  if (atPathStripMatches && atPathStripMatches.length > 0) {
+    for (const m of atPathStripMatches) {
+      displayText = displayText.split(m).join("");
+    }
+    displayText = displayText.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  }
 
   if (displayText) {
     if (msg.role === "assistant") {
@@ -6762,6 +6944,172 @@ function appendToolCall(label, url, active = false, opts = {}) {
 
   setToolDots(el, active);
   if (!noScroll && shouldStick) scrollToBottom(true);
+}
+
+// AskUserQuestion: render an inline card with clickable options. On click,
+// post the answer as a normal user message (the gateway queues it as the
+// answering turn). The form locks itself after submit so it can't fire twice.
+function extractAskUserQuestions(args) {
+  const tryShape = (v) => {
+    if (!v) return null;
+    if (Array.isArray(v.questions)) return v.questions;
+    if (v.input && Array.isArray(v.input.questions)) return v.input.questions;
+    if (v.arguments && Array.isArray(v.arguments.questions)) return v.arguments.questions;
+    if (typeof v === "string") {
+      try {
+        const p = JSON.parse(v);
+        if (Array.isArray(p?.questions)) return p.questions;
+        if (p?.input && Array.isArray(p.input.questions)) return p.input.questions;
+      } catch {}
+    }
+    return null;
+  };
+  return tryShape(args) || [];
+}
+
+function renderAskUserQuestionForm(args, toolCallId) {
+  const existing = document.getElementById(`oc-askq-${toolCallId}`);
+  const questions = extractAskUserQuestions(args);
+
+  // Always render a card on first call, even if args aren't ready — replace
+  // it with the real options once they arrive.
+  if (existing && existing.dataset.populated === "1") return;
+  if (existing && questions.length === 0) return; // placeholder already showing, wait
+
+  if (!existing && questions.length === 0) {
+    const placeholder = document.createElement("div");
+    placeholder.className = "openclaw-askq-card openclaw-askq-placeholder";
+    placeholder.id = `oc-askq-${toolCallId}`;
+    placeholder.innerHTML =
+      '<div class="openclaw-askq-question-text">The agent is asking a question…</div>' +
+      '<div class="openclaw-askq-other-input" style="opacity:0.6;font-size:11px;cursor:default">' +
+        'Type your answer in the composer below to continue.' +
+      '</div>';
+    ui.messagesContainer.appendChild(placeholder);
+    if (state.autoScrollPinned !== false) scrollToBottom(true);
+    return;
+  }
+
+  const card = document.createElement("div");
+  card.className = "openclaw-askq-card";
+  card.id = `oc-askq-${toolCallId}`;
+  card.dataset.populated = "1";
+
+  const formState = { answers: {}, submitted: false };
+
+  for (let qIdx = 0; qIdx < questions.length; qIdx++) {
+    const q = questions[qIdx] || {};
+    const questionText = str(q.question || q.prompt || `Question ${qIdx + 1}`);
+    const header = str(q.header);
+    const options = Array.isArray(q.options) ? q.options : [];
+    const multi = !!q.multiSelect;
+
+    const qBlock = document.createElement("div");
+    qBlock.className = "openclaw-askq-question";
+
+    if (header) {
+      const tag = document.createElement("div");
+      tag.className = "openclaw-askq-header";
+      tag.textContent = header;
+      qBlock.appendChild(tag);
+    }
+
+    const qText = document.createElement("div");
+    qText.className = "openclaw-askq-question-text";
+    qText.textContent = questionText;
+    qBlock.appendChild(qText);
+
+    const optsWrap = document.createElement("div");
+    optsWrap.className = "openclaw-askq-options";
+    qBlock.appendChild(optsWrap);
+
+    formState.answers[qIdx] = multi ? [] : null;
+
+    for (let oIdx = 0; oIdx < options.length; oIdx++) {
+      const opt = options[oIdx] || {};
+      const label = str(opt.label || opt.value || `Option ${oIdx + 1}`);
+      const desc = str(opt.description);
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "openclaw-askq-option";
+      const labelEl = document.createElement("div");
+      labelEl.className = "openclaw-askq-option-label";
+      labelEl.textContent = label;
+      btn.appendChild(labelEl);
+      if (desc) {
+        const descEl = document.createElement("div");
+        descEl.className = "openclaw-askq-option-desc";
+        descEl.textContent = desc;
+        btn.appendChild(descEl);
+      }
+      btn.addEventListener("click", () => {
+        if (formState.submitted) return;
+        if (multi) {
+          const sel = formState.answers[qIdx];
+          const at = sel.indexOf(label);
+          if (at >= 0) { sel.splice(at, 1); btn.classList.remove("openclaw-askq-option-selected"); }
+          else { sel.push(label); btn.classList.add("openclaw-askq-option-selected"); }
+        } else {
+          formState.answers[qIdx] = label;
+          optsWrap.querySelectorAll(".openclaw-askq-option")
+            .forEach((b) => b.classList.toggle("openclaw-askq-option-selected", b === btn));
+        }
+      });
+      optsWrap.appendChild(btn);
+    }
+
+    const otherWrap = document.createElement("div");
+    otherWrap.className = "openclaw-askq-other";
+    const otherInput = document.createElement("input");
+    otherInput.type = "text";
+    otherInput.placeholder = "Other (type a custom answer)…";
+    otherInput.className = "openclaw-askq-other-input";
+    otherInput.addEventListener("input", () => {
+      const val = otherInput.value.trim();
+      if (val) {
+        formState.answers[qIdx] = multi ? [val] : val;
+        optsWrap.querySelectorAll(".openclaw-askq-option")
+          .forEach((b) => b.classList.remove("openclaw-askq-option-selected"));
+      }
+    });
+    otherWrap.appendChild(otherInput);
+    qBlock.appendChild(otherWrap);
+
+    card.appendChild(qBlock);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "openclaw-askq-actions";
+  const submitBtn = document.createElement("button");
+  submitBtn.type = "button";
+  submitBtn.className = "openclaw-askq-submit";
+  submitBtn.textContent = "Send answer";
+  submitBtn.addEventListener("click", () => {
+    if (formState.submitted) return;
+    const lines = [];
+    for (let qIdx = 0; qIdx < questions.length; qIdx++) {
+      const q = questions[qIdx] || {};
+      const a = formState.answers[qIdx];
+      const answerText = Array.isArray(a) ? a.filter(Boolean).join(", ") : str(a);
+      if (!answerText) continue;
+      lines.push(`Q: ${str(q.question || q.prompt)}\nA: ${answerText}`);
+    }
+    if (lines.length === 0) return;
+    formState.submitted = true;
+    submitBtn.disabled = true;
+    submitBtn.textContent = "sent";
+    card.classList.add("openclaw-askq-submitted");
+    void sendMessage(lines.join("\n\n"));
+  });
+  actions.appendChild(submitBtn);
+  card.appendChild(actions);
+
+  if (existing) {
+    existing.replaceWith(card);
+  } else {
+    ui.messagesContainer.appendChild(card);
+  }
+  if (state.autoScrollPinned !== false) scrollToBottom(true);
 }
 
 function deactivateLastToolItem() {
@@ -7548,7 +7896,8 @@ function handleStreamEvent(payload) {
     if (ss.text) ss.splitPoints.push(ss.text.length);
 
     const resolvedToolCallId = toolCallId || `tool-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-    const { label, url } = buildToolLabel(toolName, (payloadData?.args || payload.args));
+    const toolArgs = payloadData?.args || payload.args;
+    const { label, url } = buildToolLabel(toolName, toolArgs);
     ss.toolCalls.push(label);
     const item = { type: "tool", id: resolvedToolCallId, label, url, active: true, detail: "", isError: false };
     ss.items.push(item);
@@ -7556,6 +7905,11 @@ function handleStreamEvent(payload) {
       if (shouldShowToolEvents()) appendToolCall(label, url, true, { toolCallId: resolvedToolCallId });
       renderTypingLabel(shouldShowToolEvents() ? label : STATUS_WORKING, sessionKey);
       ui.typingIndicator.classList.remove("oc-hidden");
+    }
+    if (toolName === "AskUserQuestion" && isActiveTab) {
+      // args may be empty at start (Claude streams tool input via deltas) —
+      // try now and re-try on later phases until we get parseable questions.
+      renderAskUserQuestionForm(toolArgs, resolvedToolCallId);
     }
   } else if ((stream === "tool" || toolName) && phase === "update") {
     const detail = summarizeToolResult(payloadData?.partialResult);
@@ -7570,6 +7924,10 @@ function handleStreamEvent(payload) {
       });
       ui.typingIndicator.classList.remove("oc-hidden");
       renderTypingLabel(item.label, sessionKey);
+    }
+    if (toolName === "AskUserQuestion" && isActiveTab) {
+      const args = payloadData?.args || payloadData?.input || payloadData?.partialArgs || payload.args;
+      renderAskUserQuestionForm(args, toolCallId);
     }
   } else if ((stream === "tool" || toolName) && phase === "result") {
     const item = getToolEntry(ss, toolCallId);
@@ -7717,6 +8075,7 @@ function handleChatEvent(payload) {
     }
   } else if (chatState === "final") {
     recordWorkSummary(eventSessionKey, runId, estimateDurationMs(), "completed");
+    captureLastCallUsage(eventSessionKey, payload.message);
 
     let finalText = "";
     if (runId && state.streamAssembler) {
@@ -8868,6 +9227,7 @@ window.ocResetCloseConfirm = () => { setCloseConfirmDisabled(false); console.log
 
 function updateDashboard() {
   const connected = state.gateway?.connected;
+  if (connected) ensureModelCatalog();
 
   // Orb state
   const orb = document.getElementById('hud-orb');
@@ -8903,6 +9263,7 @@ function updateDashboard() {
 
   // Refresh server panel on connection change
   updateServerPanel();
+  updateTabSettingsPanel();
 
   // Show connect form or dashboard content
   const connectForm = document.getElementById('dash-connect-form');
@@ -8950,17 +9311,16 @@ async function fetchServerInfo() {
       const sessResult = await state.gateway.request("sessions.list", {});
       const sessions = sessResult?.sessions || [];
       state._sessionCount = sessions.length;
-      // Categorize sessions
-      let tabs = 0, cron = 0, telegram = 0, subagent = 0, other = 0;
+      // Categorize sessions by source (human, sub-agent, cron/heartbeat, system).
+      const source = { human: 0, subagent: 0, cron: 0, system: 0 };
       for (const s of sessions) {
-        const k = s.key || '';
-        if (k.includes(':tab-') || k.endsWith(':main')) tabs++;
-        else if (k.includes(':cron:')) cron++;
-        else if (k.includes(':telegram:')) telegram++;
-        else if (k.includes(':subagent:')) subagent++;
-        else other++;
+        const bucket = classifySessionSource(s);
+        if (bucket === "human") source.human += 1;
+        else if (bucket === "subagent") source.subagent += 1;
+        else if (bucket === "cron") source.cron += 1;
+        else source.system += 1;
       }
-      state._sessionBreakdown = { tabs, cron, telegram, subagent, other };
+      state._sessionBreakdown = { source };
     } catch {
       state._sessionCount = state._cachedSessions?.length || 0;
       state._sessionBreakdown = null;
@@ -9001,6 +9361,7 @@ async function fetchServerInfo() {
 
     // Render the server panel
     updateServerPanel();
+  updateTabSettingsPanel();
 
     // Clear top alerts (no longer used)
     const alertsEl = document.getElementById('hud-alerts');
@@ -9018,7 +9379,8 @@ async function fetchServerInfo() {
 
   } catch (err) {
     console.warn('Failed to fetch server info:', err);
-    updateServerPanel(); // render what we have
+    updateServerPanel();
+  updateTabSettingsPanel(); // render what we have
     const dash = document.getElementById('dashboard');
     if (dash) {
       dash.classList.remove('dash-loading');
@@ -9088,41 +9450,13 @@ function updateServerPanel() {
     versionHtml +
     (uptimeDisplay ? '<div class="hud-settings-row"><span class="hud-settings-label">Uptime</span><span class="hud-settings-value">' + uptimeDisplay + '</span></div>' : '');
 
-  // Session breakdown — grouped into active vs background
-  const bd = state._sessionBreakdown;
+  html +=
+    '<div class="hud-settings-row">' +
+      '<span class="hud-settings-label">Sessions</span>' +
+      '<span class="hud-settings-value">' + sessionCount + ' active</span>' +
+    '</div>';
 
-  if (bd) {
-    // Active conversations
-    const activeParts = [];
-    if (bd.tabs) activeParts.push(bd.tabs + ' webchat');
-    if (bd.telegram) activeParts.push(bd.telegram + ' telegram');
-    const activeStr = activeParts.length ? activeParts.join(', ') : '0';
-
-    // Background processes
-    const bgParts = [];
-    if (bd.cron) bgParts.push(bd.cron + ' cron');
-    if (bd.subagent) bgParts.push(bd.subagent + ' sub-agent');
-    if (bd.other) bgParts.push(bd.other + ' other');
-
-    html +=
-      '<div class="hud-settings-row">' +
-        '<span class="hud-settings-label">Chats</span>' +
-        '<span class="hud-settings-value">' + activeStr + '</span>' +
-      '</div>';
-    if (bgParts.length) {
-      html +=
-        '<div class="hud-settings-row">' +
-          '<span class="hud-settings-label">Background</span>' +
-          '<span class="hud-settings-value" style="opacity:0.6">' + bgParts.join(', ') + '</span>' +
-        '</div>';
-    }
-  } else {
-    html +=
-      '<div class="hud-settings-row">' +
-        '<span class="hud-settings-label">Sessions</span>' +
-        '<span class="hud-settings-value">' + sessionCount + ' active</span>' +
-      '</div>';
-  } +
+  html +=
     '<div class="hud-settings-row">' +
       '<span class="hud-settings-label">Channels</span>' +
       '<span class="hud-settings-value hud-server-chips">' + channelChips + '</span>' +
@@ -9157,6 +9491,123 @@ function updateServerPanel() {
 
   el.innerHTML = html;
 }
+
+// Per-tab-strip bucket: matches the legacy "conv" definition for "human"
+// (suffix has no extra colon, not cron/subagent) so channel sub-sessions like
+// `telegram:direct:...` are bucketed as "system" rather than human tabs.
+function classifyTabBucket(session, prefix) {
+  const key = String(session?.key || "");
+  if (!key.startsWith(prefix)) return "system";
+  if (key.includes(":cron:")) return "cron";
+  if (key.includes(":subagent:")) return "subagent";
+  const suffix = key.slice(prefix.length);
+  if (suffix && !suffix.includes(":")) return "human";
+  return "system";
+}
+
+function classifySessionSource(session) {
+  const key = String(session?.key || "").toLowerCase();
+  const label = String(session?.label || "").toLowerCase();
+  const displayName = String(session?.displayName || "").toLowerCase();
+  const searchable = `${key} ${label} ${displayName}`;
+  if (!key) return "system";
+  if (key.includes(":cron:")) return "cron";
+  if (key.includes(":subagent:")) return "subagent";
+  if (/:tab-\d+\b/.test(key) || /:main$/.test(key)) return "human";
+  if (/(^|:)(webchat|telegram|discord|whatsapp|signal|imessage)(:|$)/.test(key)) return "human";
+  if (/(compaction|compact|maintenance|startup|retry|hook:|node:|heartbeat|tab-namer)/.test(searchable)) return "system";
+  return "system";
+}
+
+// ─── Tab Settings Panel ─────────────────────────────────────────────
+
+const TAB_SOURCE_ROWS = [
+  { key: "human", label: "Human chats", stateKey: "tabShowHuman", storageKey: "tabShowHuman" },
+  { key: "subagent", label: "Sub-agent/worker", stateKey: "tabShowSubagent", storageKey: "tabShowSubagent" },
+  { key: "cron", label: "Cron/heartbeat", stateKey: "tabShowCron", storageKey: "tabShowCron" },
+  { key: "system", label: "System/maintenance", stateKey: "tabShowSystem", storageKey: "tabShowSystem" },
+];
+
+function toggleTabSource(stateKey, storageKey) {
+  state[stateKey] = !state[stateKey];
+  localStorage.setItem(storageKey, state[stateKey] ? "1" : "0");
+  updateTabSettingsPanel();
+  renderTabs();
+}
+window.toggleTabSource = toggleTabSource;
+
+function setHomePairFromPanel(value) {
+  setHomeMirrorPreference(value);
+  renderTabs().then(() => {
+    if ((state.sessionKey || "main") === "main") {
+      delete state.tabCache.main;
+      loadChatHistory();
+      updateComposerPlaceholder();
+    }
+    updateTabSettingsPanel();
+  });
+}
+window.setHomePairFromPanel = setHomePairFromPanel;
+
+function updateTabSettingsPanel() {
+  const el = document.getElementById("hud-tab-settings-panel");
+  if (!el) return;
+
+  const counts = (state._sessionBreakdown?.source) || { human: 0, subagent: 0, cron: 0, system: 0 };
+  const total = (counts.human || 0) + (counts.subagent || 0) + (counts.cron || 0) + (counts.system || 0);
+
+  let html = "";
+
+  html += '<div class="hud-server-group-title">Show in tab bar</div>';
+  html +=
+    '<div class="hud-settings-row">' +
+      '<span class="hud-settings-label">Total sessions</span>' +
+      `<span class="hud-settings-value">${total}</span>` +
+    '</div>';
+
+  for (const row of TAB_SOURCE_ROWS) {
+    const checked = !!state[row.stateKey];
+    const count = counts[row.key] || 0;
+    html +=
+      '<div class="hud-settings-row">' +
+        `<span class="hud-settings-label">${escapeHtmlChat(row.label)} <span style="opacity:0.5">· ${count}</span></span>` +
+        '<label class="hud-toggle">' +
+          `<input type="checkbox" ${checked ? "checked" : ""} onchange="toggleTabSource('${row.stateKey}','${row.storageKey}')">` +
+          '<span class="hud-toggle-track"></span>' +
+        '</label>' +
+      '</div>';
+  }
+
+  // Home pairing — moved from bottom bar
+  const pairOptions = (state.homePairOptions || []).filter((o) => o.value === "main" || o.value.startsWith("telegram:direct:"));
+  const activeValue = state.homeMirrorSessionKey || "main";
+
+  html += '<div class="hud-settings-divider"></div>';
+  html += '<div class="hud-server-group-title">Home pairing</div>';
+
+  if (pairOptions.length === 0) {
+    html +=
+      '<div class="hud-settings-row">' +
+        '<span class="hud-settings-label">Paired to</span>' +
+        '<span class="hud-settings-value">Main</span>' +
+      '</div>';
+  } else {
+    html += '<div class="hud-settings-row"><span class="hud-settings-label">Paired to</span><div class="hud-chip-group">';
+    for (const opt of pairOptions) {
+      const shortLabel = (opt.label || "").split("·")[0].trim() || opt.value;
+      const isActive = opt.value === activeValue;
+      const safeVal = String(opt.value).replace(/'/g, "\\'");
+      html +=
+        `<button class="hud-chip${isActive ? " active" : ""}" onclick="setHomePairFromPanel('${safeVal}')" title="${escapeHtmlChat(opt.label || opt.value)}">` +
+          escapeHtmlChat(shortLabel) +
+        '</button>';
+    }
+    html += '</div></div>';
+  }
+
+  el.innerHTML = html;
+}
+window.updateTabSettingsPanel = updateTabSettingsPanel;
 
 // ─── Agent File List + Viewer ─────────────────────────────────────
 
@@ -9854,6 +10305,13 @@ const DEFAULT_OPTIONS = {
   verbose: ["not set", "off", "on", "full"],
 };
 
+// Recommended AI Model defaults — Opus 4.7 primary, no fallbacks
+// (per 2026-05-21 stabilization decision in agent memory).
+const RECOMMENDED_MODEL_DEFAULTS = {
+  model: "anthropic/claude-opus-4-7",
+  fallbacks: [],
+};
+
 function defaultOptionLabel(key, opt) {
   if (opt === "xhigh") return "very high";
   return opt;
@@ -9938,6 +10396,13 @@ const RECOMMENDED_RELIABILITY_DEFAULTS = {
     timeoutSeconds: 900,
     notifyUser: true,
   },
+  schedule: {
+    resetMode: "daily",
+    resetAtHour: 4,
+    heartbeatEvery: "1h",
+  },
+  agentTimeoutSeconds: RECOMMENDED_AGENT_TIMEOUT_SECONDS,
+  llmIdleTimeoutSeconds: RECOMMENDED_LLM_IDLE_TIMEOUT_SECONDS,
 };
 
 // ─── AI Model panel (requires session reset) ────────────────────────
@@ -9979,7 +10444,23 @@ function updateDefaultsPanel() {
     '</div>';
   }
 
-  let html =
+  // Recommended baseline: Opus 4.7 primary, no fallbacks
+  const recModelOk = String(d.model || "") === RECOMMENDED_MODEL_DEFAULTS.model
+    && normalizeFallbacks(d.fallbacks || [], d.model).length === RECOMMENDED_MODEL_DEFAULTS.fallbacks.length;
+
+  let html = '';
+  html += '<div class="hud-reliability-summary">' +
+    (recModelOk
+      ? '<span class="hud-reliability-summary-ok">✓ Using recommended model defaults</span>'
+      : '<span class="hud-reliability-summary-warn">Model defaults differ from recommended.</span>') +
+    '</div>';
+  html += '<button class="hud-defaults-apply hud-defaults-apply-primary" id="hud-model-apply-rec"' +
+    (recModelOk ? ' disabled' : '') +
+    ' onclick="applyRecommendedModelDefaults()">' +
+    (recModelOk ? 'recommended applied' : 'apply recommended &amp; save') +
+    '</button>';
+
+  html +=
     '<div class="hud-defaults-row">' +
       '<span class="hud-defaults-label">Model</span>' +
       '<span class="hud-defaults-value hud-defaults-editable' + (modelPending ? ' hud-defaults-pending' : '') + '" id="hud-default-model">' + modelDisplay + '</span>' +
@@ -10100,6 +10581,7 @@ function updateReliabilityPanel() {
   const truncateOn = d.compactionTruncateAfterCompaction === true;
   const maxTranscriptOn = String(d.compactionMaxActiveTranscriptBytes || "") === rec.compaction.maxActiveTranscriptBytes;
   const reserveFloorOn = Number(d.compactionReserveTokensFloor || 0) === Number(rec.compaction.reserveTokensFloor || 0);
+
   const pendingAgentTimeoutRaw = Number(state.pendingDefaults.agentTimeoutSeconds);
   const defaultAgentTimeoutRaw = Number(d.agentTimeoutSeconds);
   const currentAgentTimeout = normalizeIdleTimeoutSeconds(
@@ -10119,6 +10601,36 @@ function updateReliabilityPanel() {
     DEFAULT_LLM_IDLE_TIMEOUT_SECONDS
   );
   const idleTimeoutPending = "llmIdleTimeoutSeconds" in state.pendingDefaults;
+
+  // Schedule fields (was a separate panel)
+  const pendingResetMode = state.pendingDefaults.resetMode;
+  const pendingResetAtHour = state.pendingDefaults.resetAtHour;
+  const pendingResetIdle = state.pendingDefaults.resetIdleMinutes;
+  const pendingHeartbeat = state.pendingDefaults.heartbeatEvery;
+  const resetMode = (pendingResetMode ?? d.resetMode) === "idle" ? "idle" : "daily";
+  const resetAtHour = Number.isFinite(Number(pendingResetAtHour ?? d.resetAtHour))
+    ? Math.max(0, Math.min(23, Math.round(Number(pendingResetAtHour ?? d.resetAtHour))))
+    : rec.schedule.resetAtHour;
+  const resetIdleMinutes = Number.isFinite(Number(pendingResetIdle ?? d.resetIdleMinutes)) && Number(pendingResetIdle ?? d.resetIdleMinutes) > 0
+    ? Math.round(Number(pendingResetIdle ?? d.resetIdleMinutes))
+    : 240;
+  const heartbeatEvery = pendingHeartbeat ?? d.heartbeatEvery ?? "0m";
+  const resetModePending = "resetMode" in state.pendingDefaults;
+  const resetHourPending = "resetAtHour" in state.pendingDefaults;
+  const resetIdlePending = "resetIdleMinutes" in state.pendingDefaults;
+  const heartbeatPending = "heartbeatEvery" in state.pendingDefaults;
+
+  // Are *all* recommended values currently active?
+  const timeoutsOk = Number(currentAgentTimeout) === Number(rec.agentTimeoutSeconds)
+    && Number(currentIdleTimeout) === Number(rec.llmIdleTimeoutSeconds);
+  const scheduleOk = resetMode === rec.schedule.resetMode
+    && resetAtHour === rec.schedule.resetAtHour
+    && heartbeatEvery === rec.schedule.heartbeatEvery;
+  const allRecommended = contextInjectionOn && contextPruningOn && midTurnOn && truncateOn
+    && maxTranscriptOn && reserveFloorOn && timeoutsOk && scheduleOk;
+
+  const hasPendingEdit = agentTimeoutPending || idleTimeoutPending
+    || resetModePending || resetHourPending || resetIdlePending || heartbeatPending;
 
   function renderTimeoutSelect(key, label, currentSec, pending, recommendedSec) {
     const cls = pending ? ' hud-defaults-pending' : '';
@@ -10149,7 +10661,25 @@ function updateReliabilityPanel() {
     '</div>';
   }
 
-  let html =
+  // ── Primary action: one-click recommended + save ──
+  let html = '';
+  html += '<div class="hud-reliability-summary">' +
+    (allRecommended
+      ? '<span class="hud-reliability-summary-ok">✓ Using recommended settings</span>'
+      : '<span class="hud-reliability-summary-warn">Some values differ from recommended.</span>') +
+    '</div>';
+
+  const primaryLabel = allRecommended ? 'recommended applied' : 'apply recommended &amp; save';
+  html += '<button class="hud-defaults-apply hud-defaults-apply-primary" id="hud-reliability-apply"' +
+    (allRecommended ? ' disabled' : '') +
+    ' onclick="applyRecommendedReliabilityDefaults()">' + primaryLabel + '</button>';
+
+  // ── Advanced (customize) ──
+  html += '<details class="hud-reliability-advanced"' + (hasPendingEdit ? ' open' : '') + '>' +
+    '<summary>Customize</summary>' +
+    '<div class="hud-reliability-advanced-body">';
+
+  html +=
     renderReliabilityToggle('rel-context-injection', 'Bootstrap injection', contextInjectionOn, 'Recommended ON: continuation-skip') +
     renderReliabilityToggle('rel-context-pruning', 'Tool-result pruning', contextPruningOn, 'Recommended ON: cache-ttl') +
     '<div class="hud-defaults-row">' +
@@ -10163,20 +10693,58 @@ function updateReliabilityPanel() {
     renderReliabilityToggle('rel-max-transcript', 'Compaction auto-threshold', maxTranscriptOn, `Recommended ON: ${rec.compaction.maxActiveTranscriptBytes}`) +
     renderReliabilityToggle('rel-reserve-floor', 'Reserve tokens floor', reserveFloorOn, `Recommended ON: ${Number(rec.compaction.reserveTokensFloor || 0).toLocaleString()} tokens`);
 
-  html += '<div style="margin-top:6px;font-size:11px;line-height:1.35;color:var(--text-muted);opacity:0.85">' +
-    'Recommended mode prunes tool-heavy context sooner and compacts before sessions hit overflow.' +
-    '</div>';
-
   html += '<div class="hud-settings-divider" style="margin:6px 0"></div>' +
     renderTimeoutSelect("agentTimeoutSeconds", "Run timeout", currentAgentTimeout, agentTimeoutPending, RECOMMENDED_AGENT_TIMEOUT_SECONDS) +
     renderTimeoutSelect("llmIdleTimeoutSeconds", "Idle watchdog", currentIdleTimeout, idleTimeoutPending, RECOMMENDED_LLM_IDLE_TIMEOUT_SECONDS);
 
-  if (agentTimeoutPending || idleTimeoutPending) {
-    html += '<button class="hud-defaults-apply" id="hud-reliability-timeout-save" onclick="applyTimeoutDefaults()">save timeout defaults</button>';
+  // Schedule rows (merged in from the old standalone Schedule panel)
+  html += '<div class="hud-settings-divider" style="margin:6px 0"></div>';
+  html += '<div class="hud-defaults-row">' +
+      '<span class="hud-defaults-label">Session reset</span>' +
+      '<select class="hud-defaults-select hud-schedule-select' + (resetModePending ? ' hud-defaults-pending' : '') + '" data-schedule-key="resetMode">' +
+        '<option value="daily"' + (resetMode === 'daily' ? ' selected' : '') + '>daily</option>' +
+        '<option value="idle"' + (resetMode === 'idle' ? ' selected' : '') + '>idle only</option>' +
+      '</select>' +
+    '</div>';
+  if (resetMode === 'daily') {
+    html += '<div class="hud-defaults-row">' +
+        '<span class="hud-defaults-label">Reset hour (UTC)</span>' +
+        '<select class="hud-defaults-select hud-schedule-select' + (resetHourPending ? ' hud-defaults-pending' : '') + '" data-schedule-key="resetAtHour">' +
+          Array.from({ length: 24 }, (_, h) => {
+            const hh = String(h).padStart(2, '0') + ':00';
+            return '<option value="' + h + '"' + (h === resetAtHour ? ' selected' : '') + '>' + hh + '</option>';
+          }).join('') +
+        '</select>' +
+      '</div>';
+  } else {
+    html += '<div class="hud-defaults-row">' +
+        '<span class="hud-defaults-label">Idle timeout</span>' +
+        '<select class="hud-defaults-select hud-schedule-select' + (resetIdlePending ? ' hud-defaults-pending' : '') + '" data-schedule-key="resetIdleMinutes">' +
+          RESET_IDLE_MINUTES_OPTIONS.map(mins => {
+            const label = mins >= 1440
+              ? (mins % 1440 === 0 ? (mins / 1440) + 'd' : mins + 'm')
+              : mins + 'm';
+            return '<option value="' + mins + '"' + (mins === resetIdleMinutes ? ' selected' : '') + '>' + label + '</option>';
+          }).join('') +
+        '</select>' +
+      '</div>';
+  }
+  html += '<div class="hud-defaults-row">' +
+      '<span class="hud-defaults-label">Check-in</span>' +
+      '<select class="hud-defaults-select hud-schedule-select' + (heartbeatPending ? ' hud-defaults-pending' : '') + '" data-schedule-key="heartbeatEvery">' +
+        HEARTBEAT_OPTIONS.map(opt =>
+          '<option value="' + opt.value + '"' + (opt.value === heartbeatEvery ? ' selected' : '') + '>' + opt.label + '</option>'
+        ).join('') +
+      '</select>' +
+    '</div>';
+
+  if (hasPendingEdit) {
+    html += '<button class="hud-defaults-apply" id="hud-reliability-save-changes" onclick="applyReliabilityCustomChanges()">save changes</button>';
+  } else {
+    html += '<button class="hud-defaults-apply hud-defaults-apply-secondary" id="hud-reliability-save" onclick="applyReliabilitySettingsFromPanel()">save current toggles</button>';
   }
 
-  html += '<button class="hud-defaults-apply" id="hud-reliability-save" onclick="applyReliabilitySettingsFromPanel()">save reliability settings</button>';
-  html += '<button class="hud-defaults-apply" id="hud-reliability-apply" onclick="applyRecommendedReliabilityDefaults()">apply recommended</button>';
+  html += '</div></details>';
 
   el.innerHTML = html;
 
@@ -10206,7 +10774,41 @@ function updateReliabilityPanel() {
       updateBarControls();
     });
   });
+
+  el.querySelectorAll('.hud-schedule-select').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const key = sel.dataset.scheduleKey;
+      const numericKeys = new Set(["resetAtHour", "resetIdleMinutes"]);
+      const val = numericKeys.has(key) ? Number(sel.value) : sel.value;
+      const cur = state.defaults[key];
+      const same = numericKeys.has(key)
+        ? Number(val) === Number(cur)
+        : String(val ?? "") === String(cur ?? "");
+
+      if (same) {
+        delete state.pendingDefaults[key];
+      } else {
+        state.pendingDefaults[key] = val;
+      }
+
+      if (key === "resetMode") {
+        if (val === "daily") delete state.pendingDefaults.resetIdleMinutes;
+        if (val === "idle") delete state.pendingDefaults.resetAtHour;
+      }
+
+      updateReliabilityPanel();
+      updateBarControls();
+    });
+  });
 }
+
+async function applyReliabilityCustomChanges() {
+  // Save both reliability toggles and any pending schedule/timeout edits in one call.
+  await applyReliabilitySettingsFromPanel();
+  if (hasSchedulePending()) await applyScheduleChanges();
+  if (hasTimeoutPending()) await applyTimeoutDefaults();
+}
+window.applyReliabilityCustomChanges = applyReliabilityCustomChanges;
 
 async function applyReliabilitySettingsFromPanel() {
   if (!state.gateway?.connected) return;
@@ -10289,18 +10891,31 @@ async function applyRecommendedReliabilityDefaults() {
     const hash = getResult?.hash || "";
     const rec = RECOMMENDED_RELIABILITY_DEFAULTS;
 
+    // Schema-supported paths (see config-loader at line ~2127):
+    //   agents.defaults.timeoutSeconds          ← agent run timeout
+    //   agents.defaults.heartbeat.every         ← check-in
+    //   agents.defaults.contextInjection / contextPruning / compaction
+    //   session.reset                           ← daily/idle reset
+    // The "LLM idle watchdog" is a client-only preference stored in localStorage.
     const rawPatch = {
       agents: {
         defaults: {
           contextInjection: rec.contextInjection,
           contextPruning: rec.contextPruning,
           compaction: rec.compaction,
+          timeoutSeconds: rec.agentTimeoutSeconds,
+          heartbeat: { every: rec.schedule.heartbeatEvery },
         },
+      },
+      session: {
+        reset: { mode: rec.schedule.resetMode, atHour: rec.schedule.resetAtHour },
       },
     };
 
     state.gatewayRestarting = true;
     await state.gateway.request("config.patch", { raw: JSON.stringify(rawPatch), baseHash: hash });
+
+    try { localStorage.setItem(LLM_IDLE_TIMEOUT_STORAGE_KEY, String(rec.llmIdleTimeoutSeconds)); } catch {}
 
     state.defaults.contextInjection = rec.contextInjection;
     state.defaults.contextPruningMode = rec.contextPruning.mode;
@@ -10309,6 +10924,16 @@ async function applyRecommendedReliabilityDefaults() {
     state.defaults.compactionTruncateAfterCompaction = true;
     state.defaults.compactionMaxActiveTranscriptBytes = rec.compaction.maxActiveTranscriptBytes;
     state.defaults.compactionReserveTokensFloor = Number(rec.compaction.reserveTokensFloor || 0);
+    state.defaults.agentTimeoutSeconds = rec.agentTimeoutSeconds;
+    state.defaults.llmIdleTimeoutSeconds = rec.llmIdleTimeoutSeconds;
+    state.defaults.resetMode = rec.schedule.resetMode;
+    state.defaults.resetAtHour = rec.schedule.resetAtHour;
+    state.defaults.heartbeatEvery = rec.schedule.heartbeatEvery;
+
+    // Recommended apply blows away any local pending edits for the merged keys.
+    for (const k of ["agentTimeoutSeconds", "llmIdleTimeoutSeconds", "resetMode", "resetAtHour", "resetIdleMinutes", "heartbeatEvery"]) {
+      delete state.pendingDefaults[k];
+    }
 
     setTimeout(() => { state.gatewayRestarting = false; }, 2000);
     updateReliabilityPanel();
@@ -10318,114 +10943,13 @@ async function applyRecommendedReliabilityDefaults() {
     console.warn("Failed to apply reliability defaults:", err);
     if (applyBtn) {
       applyBtn.disabled = false;
-      applyBtn.textContent = "apply recommended";
+      applyBtn.textContent = "apply recommended & save";
     }
   }
 }
 
-// ─── Schedule panel (reset + heartbeat) ──────────────────────────────
-function updateSchedulePanel() {
-  const el = document.getElementById("hud-schedule-panel");
-  if (!el) return;
-  const d = state.defaults;
-
-  const pendingResetMode = state.pendingDefaults.resetMode;
-  const pendingResetAtHour = state.pendingDefaults.resetAtHour;
-  const pendingResetIdle = state.pendingDefaults.resetIdleMinutes;
-  const pendingHeartbeat = state.pendingDefaults.heartbeatEvery;
-
-  const resetMode = (pendingResetMode ?? d.resetMode) === "idle" ? "idle" : "daily";
-  const resetAtHour = Number.isFinite(Number(pendingResetAtHour ?? d.resetAtHour))
-    ? Math.max(0, Math.min(23, Math.round(Number(pendingResetAtHour ?? d.resetAtHour))))
-    : 4;
-  const resetIdleMinutes = Number.isFinite(Number(pendingResetIdle ?? d.resetIdleMinutes)) && Number(pendingResetIdle ?? d.resetIdleMinutes) > 0
-    ? Math.round(Number(pendingResetIdle ?? d.resetIdleMinutes))
-    : 240;
-  const heartbeatEvery = pendingHeartbeat ?? d.heartbeatEvery ?? "0m";
-
-  const resetModePending = "resetMode" in state.pendingDefaults;
-  const resetHourPending = "resetAtHour" in state.pendingDefaults;
-  const resetIdlePending = "resetIdleMinutes" in state.pendingDefaults;
-  const heartbeatPending = "heartbeatEvery" in state.pendingDefaults;
-
-  const resetModeHtml =
-    '<div class="hud-defaults-row">' +
-      '<span class="hud-defaults-label">Session reset</span>' +
-      '<select class="hud-defaults-select hud-schedule-select' + (resetModePending ? ' hud-defaults-pending' : '') + '" data-schedule-key="resetMode">' +
-        '<option value="daily"' + (resetMode === 'daily' ? ' selected' : '') + '>daily</option>' +
-        '<option value="idle"' + (resetMode === 'idle' ? ' selected' : '') + '>idle only</option>' +
-      '</select>' +
-    '</div>';
-
-  const resetDetailHtml = resetMode === 'daily'
-    ? '<div class="hud-defaults-row">' +
-        '<span class="hud-defaults-label">Reset hour (UTC)</span>' +
-        '<select class="hud-defaults-select hud-schedule-select' + (resetHourPending ? ' hud-defaults-pending' : '') + '" data-schedule-key="resetAtHour">' +
-          Array.from({ length: 24 }, (_, h) => {
-            const hh = String(h).padStart(2, '0') + ':00';
-            return '<option value="' + h + '"' + (h === resetAtHour ? ' selected' : '') + '>' + hh + '</option>';
-          }).join('') +
-        '</select>' +
-      '</div>'
-    : '<div class="hud-defaults-row">' +
-        '<span class="hud-defaults-label">Idle timeout</span>' +
-        '<select class="hud-defaults-select hud-schedule-select' + (resetIdlePending ? ' hud-defaults-pending' : '') + '" data-schedule-key="resetIdleMinutes">' +
-          RESET_IDLE_MINUTES_OPTIONS.map(mins => {
-            const label = mins >= 1440
-              ? (mins % 1440 === 0 ? (mins / 1440) + 'd' : mins + 'm')
-              : mins + 'm';
-            return '<option value="' + mins + '"' + (mins === resetIdleMinutes ? ' selected' : '') + '>' + label + '</option>';
-          }).join('') +
-        '</select>' +
-      '</div>';
-
-  const heartbeatHtml =
-    '<div class="hud-defaults-row">' +
-      '<span class="hud-defaults-label">Check-in</span>' +
-      '<select class="hud-defaults-select hud-schedule-select' + (heartbeatPending ? ' hud-defaults-pending' : '') + '" data-schedule-key="heartbeatEvery">' +
-        HEARTBEAT_OPTIONS.map(opt =>
-          '<option value="' + opt.value + '"' + (opt.value === heartbeatEvery ? ' selected' : '') + '>' + opt.label + '</option>'
-        ).join('') +
-      '</select>' +
-    '</div>';
-
-  let html = resetModeHtml + resetDetailHtml +
-    '<div class="hud-settings-divider" style="margin:6px 0"></div>' +
-    heartbeatHtml;
-
-  if (hasSchedulePending()) {
-    html += '<button class="hud-defaults-apply" id="hud-schedule-apply" onclick="applyScheduleChanges()">save</button>';
-  }
-
-  el.innerHTML = html;
-
-  // Wire up schedule selects
-  el.querySelectorAll('.hud-schedule-select').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const key = sel.dataset.scheduleKey;
-      const numericKeys = new Set(["resetAtHour", "resetIdleMinutes"]);
-      const val = numericKeys.has(key) ? Number(sel.value) : sel.value;
-      const cur = state.defaults[key];
-      const same = numericKeys.has(key)
-        ? Number(val) === Number(cur)
-        : String(val ?? "") === String(cur ?? "");
-
-      if (same) {
-        delete state.pendingDefaults[key];
-      } else {
-        state.pendingDefaults[key] = val;
-      }
-
-      if (key === "resetMode") {
-        if (val === "daily") delete state.pendingDefaults.resetIdleMinutes;
-        if (val === "idle") delete state.pendingDefaults.resetAtHour;
-      }
-
-      updateSchedulePanel();
-      updateBarControls();
-    });
-  });
-}
+// Schedule controls are now rendered inside updateReliabilityPanel(). The standalone
+// updateSchedulePanel() function has been folded into the merged Reliability panel.
 
 function hasSchedulePending() {
   return ["resetMode", "resetAtHour", "resetIdleMinutes", "heartbeatEvery"].some(k => k in state.pendingDefaults);
@@ -10434,7 +10958,7 @@ function hasSchedulePending() {
 async function applyScheduleChanges() {
   if (!hasSchedulePending() || !state.gateway?.connected) return;
 
-  const applyBtn = document.getElementById("hud-schedule-apply");
+  const applyBtn = document.getElementById("hud-reliability-save-changes");
   if (applyBtn) { applyBtn.disabled = true; applyBtn.textContent = "saving…"; }
 
   try {
@@ -10466,7 +10990,7 @@ async function applyScheduleChanges() {
     }
 
     if (Object.keys(rawPatch).length === 0) {
-      if (applyBtn) { applyBtn.disabled = false; applyBtn.textContent = "save"; }
+      if (applyBtn) { applyBtn.disabled = false; applyBtn.textContent = "save changes"; }
       return;
     }
 
@@ -10486,18 +11010,60 @@ async function applyScheduleChanges() {
     // If gateway didn't restart (no WS drop within 2s), clear the flag
     setTimeout(() => { state.gatewayRestarting = false; }, 2000);
 
-    updateSchedulePanel();
+    updateReliabilityPanel();
     updateBarControls();
   } catch (err) {
     state.gatewayRestarting = false;
     console.warn("Failed to apply schedule:", err);
-    if (applyBtn) { applyBtn.disabled = false; applyBtn.textContent = "save"; }
+    if (applyBtn) { applyBtn.disabled = false; applyBtn.textContent = "save changes"; }
   }
 }
 
 function hasPendingDefaults() {
   return hasModelPending() || hasTimeoutPending() || hasSchedulePending();
 }
+
+async function applyRecommendedModelDefaults() {
+  if (!state.gateway?.connected) return;
+  const applyBtn = document.getElementById("hud-model-apply-rec");
+  if (applyBtn) { applyBtn.disabled = true; applyBtn.textContent = "saving…"; }
+
+  try {
+    const getResult = await state.gateway.request("config.get", {});
+    const hash = getResult?.hash || "";
+
+    const nextPrimary = RECOMMENDED_MODEL_DEFAULTS.model;
+    const nextFallbacks = normalizeFallbacks(RECOMMENDED_MODEL_DEFAULTS.fallbacks, nextPrimary);
+
+    const raw = JSON.stringify({
+      agents: { defaults: { model: { primary: nextPrimary, fallbacks: nextFallbacks } } },
+    });
+    state.gatewayRestarting = true;
+    await state.gateway.request("config.patch", { raw, baseHash: hash });
+
+    state.defaults.model = nextPrimary;
+    state.defaults.fallbacks = nextFallbacks;
+    delete state.pendingDefaults.model;
+    delete state.pendingDefaults.fallbacks;
+
+    setTimeout(() => { state.gatewayRestarting = false; }, 2000);
+
+    await updateContextMeter();
+    await renderTabs();
+    updateDefaultsPanel();
+    updateReliabilityPanel();
+    updateBarControls();
+    showBanner("Recommended model defaults applied");
+  } catch (err) {
+    state.gatewayRestarting = false;
+    console.warn("Failed to apply recommended model defaults:", err);
+    if (applyBtn) {
+      applyBtn.disabled = false;
+      applyBtn.textContent = "apply recommended & save";
+    }
+  }
+}
+window.applyRecommendedModelDefaults = applyRecommendedModelDefaults;
 
 async function applyPendingDefaults() {
   if (!hasModelPending() || !state.gateway?.connected) return;

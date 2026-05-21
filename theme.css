@@ -4572,6 +4572,151 @@ body.text-large .openclaw-tool-item { font-size: 12px; }
   color: var(--accent) !important; border-color: rgba(var(--accent-rgb),0.3) !important;
 }
 
+/* ── Reliability panel: primary apply + advanced disclosure ── */
+.hud-reliability-summary {
+  font-size: 12px; line-height: 1.4; margin-bottom: 6px; opacity: 0.85;
+}
+.hud-reliability-summary-ok { color: var(--cal-green, #22c55e); }
+.hud-reliability-summary-warn { color: var(--text-muted); }
+.hud-defaults-apply.hud-defaults-apply-primary {
+  font-weight: 600;
+  background: rgba(var(--accent-rgb),0.18) !important;
+  border-color: rgba(var(--accent-rgb),0.4) !important;
+  padding: 8px 10px !important;
+  margin-bottom: 6px;
+}
+.hud-defaults-apply.hud-defaults-apply-primary:disabled {
+  background: rgba(34,197,94,0.12) !important;
+  color: var(--cal-green, #22c55e) !important;
+  border-color: rgba(34,197,94,0.3) !important;
+  cursor: default; opacity: 1;
+}
+.hud-defaults-apply.hud-defaults-apply-secondary {
+  opacity: 0.75;
+}
+.hud-reliability-advanced {
+  margin-top: 4px;
+  border-top: 1px solid var(--border, rgba(255,255,255,0.06));
+  padding-top: 6px;
+}
+.hud-reliability-advanced > summary {
+  cursor: pointer; padding: 4px 0; font-size: 12px;
+  color: var(--text-muted); list-style: none;
+  user-select: none;
+}
+.hud-reliability-advanced > summary::-webkit-details-marker { display: none; }
+.hud-reliability-advanced > summary::before {
+  content: "›"; display: inline-block; margin-right: 6px;
+  transition: transform 0.15s ease; opacity: 0.7;
+}
+.hud-reliability-advanced[open] > summary::before { transform: rotate(90deg); }
+.hud-reliability-advanced-body { padding-top: 4px; }
+
+/* ── Missing-attachment chip fallback for @path image refs ── */
+.openclaw-attach-chip-missing {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 8px; border-radius: 8px;
+  font-size: 11px; color: var(--text-muted);
+  background: rgba(255,255,255,0.04);
+  border: 1px dashed rgba(255,255,255,0.12);
+}
+
+/* ── AskUserQuestion inline card ─────────────────────────── */
+.openclaw-askq-card {
+  align-self: stretch;
+  margin: 8px 12px 12px;
+  padding: 12px 14px;
+  border: 1px solid rgba(var(--accent-rgb), 0.25);
+  background: rgba(var(--accent-rgb), 0.05);
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text);
+}
+.openclaw-askq-card.openclaw-askq-submitted { opacity: 0.65; }
+.openclaw-askq-question { margin-bottom: 10px; }
+.openclaw-askq-question:last-of-type { margin-bottom: 4px; }
+.openclaw-askq-header {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  padding: 2px 6px;
+  border: 1px solid rgba(var(--accent-rgb), 0.35);
+  border-radius: 4px;
+  margin-bottom: 4px;
+}
+.openclaw-askq-question-text {
+  font-weight: 500;
+  margin-bottom: 8px;
+  color: var(--text);
+}
+.openclaw-askq-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.openclaw-askq-option {
+  font: inherit;
+  text-align: left;
+  width: 100%;
+  padding: 8px 10px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--text);
+  transition: background 0.1s ease, border-color 0.1s ease;
+}
+.openclaw-askq-option:hover {
+  background: rgba(var(--accent-rgb), 0.08);
+  border-color: rgba(var(--accent-rgb), 0.3);
+}
+.openclaw-askq-option-selected {
+  background: rgba(var(--accent-rgb), 0.15);
+  border-color: rgba(var(--accent-rgb), 0.55);
+}
+.openclaw-askq-option-label { font-weight: 500; }
+.openclaw-askq-option-desc {
+  margin-top: 2px;
+  font-size: 11px;
+  opacity: 0.7;
+}
+.openclaw-askq-other {
+  margin-top: 8px;
+}
+.openclaw-askq-other-input {
+  font: inherit;
+  width: 100%;
+  padding: 7px 10px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 8px;
+  color: var(--text);
+}
+.openclaw-askq-actions {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
+}
+.openclaw-askq-submit {
+  font: inherit;
+  padding: 6px 14px;
+  font-weight: 600;
+  background: rgba(var(--accent-rgb), 0.18);
+  border: 1px solid rgba(var(--accent-rgb), 0.4);
+  border-radius: 8px;
+  color: var(--accent);
+  cursor: pointer;
+}
+.openclaw-askq-submit:hover { background: rgba(var(--accent-rgb), 0.28); }
+.openclaw-askq-submit:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 /* ── Online dots — green everywhere ───────────────────── */
 .hud-embed-dot.connected {
   background: var(--cal-green) !important;
