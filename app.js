@@ -2455,8 +2455,10 @@ function renderMobileTabSwitcher() {
     };
   }
 
-  const currentFullKey = agentPrefix() + current.key;
-  const meterTitle = contextMeterTitle(current.model, current.used, current.max, current.pctRaw ?? current.pct ?? 0, currentFullKey);
+  // handleChatEvent stores activeContextCache under the suffix key (e.g. "main"
+  // / "tab-79"), which is what state.sessionKey holds; renderTabs feeds the same
+  // suffix in tab.key, so use it directly — DON'T re-add the agent prefix.
+  const meterTitle = contextMeterTitle(current.model, current.used, current.max, current.pctRaw ?? current.pct ?? 0, current.key);
   if (meterFill) {
     meterFill.style.width = (current.pct || 0) + "%";
     meterFill.title = meterTitle;
@@ -2628,7 +2630,7 @@ function renderHamburgerDropdown() {
     const fill = document.createElement("div");
     fill.className = "oc-dd-meter-fill";
     fill.style.width = tab.pct + "%";
-    const meterTitle = contextMeterTitle(tab.model, tab.used, tab.max, tab.pctRaw ?? tab.pct ?? 0, agentPrefix() + tab.key);
+    const meterTitle = contextMeterTitle(tab.model, tab.used, tab.max, tab.pctRaw ?? tab.pct ?? 0, tab.key);
     fill.title = meterTitle;
     meter.title = meterTitle;
     item.title = meterTitle;
@@ -2793,7 +2795,8 @@ async function _renderTabsInner() {
     const used = homeSession.totalTokens || 0;
     const max = homeSession.contextTokens || defaultContextMax(homeSession.model || state.currentModel);
     const pctRaw = contextUsagePercentRaw(used, max);
-    const pct = meterFillPercentForSession(homeSession.key, pctRaw, max);
+    // activeContextCache is keyed by suffix (e.g. "main"), not full session.key.
+    const pct = meterFillPercentForSession("main", pctRaw, max);
     state.tabSessions.push({
       key: "main",
       label: "Home",
@@ -2875,7 +2878,7 @@ async function _renderTabsInner() {
     const used = s.totalTokens || 0;
     const max = s.contextTokens || defaultContextMax(s.model || state.currentModel);
     const pctRaw = contextUsagePercentRaw(used, max);
-    const pct = meterFillPercentForSession(s.key, pctRaw, max);
+    const pct = meterFillPercentForSession(sk, pctRaw, max);
 
     let label = s.label || s.displayName || "";
     const renameMeta = state.tabRenameState?.[sk];
@@ -2980,7 +2983,7 @@ async function _renderTabsInner() {
 
     tabEl.appendChild(row);
 
-    const meterTitle = contextMeterTitle(tab.model, tab.used, tab.max, tab.pctRaw ?? tab.pct ?? 0, agentPrefix() + tab.key);
+    const meterTitle = contextMeterTitle(tab.model, tab.used, tab.max, tab.pctRaw ?? tab.pct ?? 0, tab.key);
     tabEl.title = meterTitle;
 
     if (!isHome) {
@@ -3678,9 +3681,13 @@ async function updateContextMeter() {
       const used = session.totalTokens || 0;
       const max = session.contextTokens || defaultContextMax(session.model || state.currentModel);
       const pctRaw = contextUsagePercentRaw(used, max);
-      const pct = meterFillPercentForSession(session.key, pctRaw, max);
+      // session.key here is the full prefixed key (e.g. agent:main:tab-79)
+      // but activeContextCache is keyed by suffix only (e.g. tab-79).
+      const prefix = agentPrefix();
+      const suffixKey = session.key?.startsWith(prefix) ? session.key.slice(prefix.length) : session.key;
+      const pct = meterFillPercentForSession(suffixKey, pctRaw, max);
       activeFill.style.width = pct + "%";
-      const meterTitle = contextMeterTitle(session.model || state.currentModel || "", used, max, pctRaw, session.key);
+      const meterTitle = contextMeterTitle(session.model || state.currentModel || "", used, max, pctRaw, suffixKey);
       activeFill.title = meterTitle;
       const activeMeter = activeFill.parentElement;
       if (activeMeter) activeMeter.title = meterTitle;

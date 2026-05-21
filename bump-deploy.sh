@@ -1,5 +1,9 @@
 #!/bin/bash
-# Auto-bump all cache version strings and deploy
+# Auto-bump all cache version strings and push to GitHub.
+# Clawtabs is local-first (served via tailscale from your own machine), so
+# users get updates by pulling from GitHub and re-running ./scripts/setup.sh.
+# (The previous Vercel deploy step targeted the retired usemyclaw.com project
+# and has been removed.)
 set -e
 
 # Bump app.js?v= in index.html
@@ -13,4 +17,3 @@ grep 'app.js?v=' index.html
 grep 'theme.css?v=' index.html
 
 git add -A && git commit -m "deploy: bump cache versions" && git push
-vercel --prod --scope humanity-labs-b649590f --yes
