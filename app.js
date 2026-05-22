@@ -2458,7 +2458,7 @@ function renderMobileTabSwitcher() {
   // handleChatEvent stores activeContextCache under the suffix key (e.g. "main"
   // / "tab-79"), which is what state.sessionKey holds; renderTabs feeds the same
   // suffix in tab.key, so use it directly — DON'T re-add the agent prefix.
-  const meterTitle = contextMeterTitle(current.model, current.used, current.max, current.pctRaw ?? current.pct ?? 0, current.key);
+  const meterTitle = contextMeterTitle(current.model, current.used, current.max, current.pctRaw ?? current.pct ?? 0, current.key, current);
   if (meterFill) {
     meterFill.style.width = (current.pct || 0) + "%";
     meterFill.title = meterTitle;
@@ -2630,7 +2630,7 @@ function renderHamburgerDropdown() {
     const fill = document.createElement("div");
     fill.className = "oc-dd-meter-fill";
     fill.style.width = tab.pct + "%";
-    const meterTitle = contextMeterTitle(tab.model, tab.used, tab.max, tab.pctRaw ?? tab.pct ?? 0, tab.key);
+    const meterTitle = contextMeterTitle(tab.model, tab.used, tab.max, tab.pctRaw ?? tab.pct ?? 0, tab.key, tab);
     fill.title = meterTitle;
     meter.title = meterTitle;
     item.title = meterTitle;
@@ -2796,7 +2796,7 @@ async function _renderTabsInner() {
     const max = homeSession.contextTokens || defaultContextMax(homeSession.model || state.currentModel);
     const pctRaw = contextUsagePercentRaw(used, max);
     // activeContextCache is keyed by suffix (e.g. "main"), not full session.key.
-    const pct = meterFillPercentForSession("main", pctRaw, max);
+    const pct = meterFillPercentForSession("main", pctRaw, max, homeSession);
     state.tabSessions.push({
       key: "main",
       label: "Home",
@@ -2808,6 +2808,9 @@ async function _renderTabsInner() {
       compactionCount: Math.max(0, Number(homeSession.compactionCheckpointCount || 0)),
       latestCompaction: homeSession.latestCompactionCheckpoint || null,
       compactionLive: !!state.compactionInFlightBySession.main,
+      inputTokens: Number(homeSession.inputTokens || 0),
+      cacheRead: Number(homeSession.cacheRead || 0),
+      cacheWrite: Number(homeSession.cacheWrite || 0),
     });
   } else {
     state.tabSessions.push({
@@ -2878,7 +2881,7 @@ async function _renderTabsInner() {
     const used = s.totalTokens || 0;
     const max = s.contextTokens || defaultContextMax(s.model || state.currentModel);
     const pctRaw = contextUsagePercentRaw(used, max);
-    const pct = meterFillPercentForSession(sk, pctRaw, max);
+    const pct = meterFillPercentForSession(sk, pctRaw, max, s);
 
     let label = s.label || s.displayName || "";
     const renameMeta = state.tabRenameState?.[sk];
@@ -2899,6 +2902,9 @@ async function _renderTabsInner() {
       compactionCount: Math.max(0, Number(s.compactionCheckpointCount || 0)),
       latestCompaction: s.latestCompactionCheckpoint || null,
       compactionLive: !!state.compactionInFlightBySession[sk],
+      inputTokens: Number(s.inputTokens || 0),
+      cacheRead: Number(s.cacheRead || 0),
+      cacheWrite: Number(s.cacheWrite || 0),
     });
   }
 
@@ -2983,7 +2989,7 @@ async function _renderTabsInner() {
 
     tabEl.appendChild(row);
 
-    const meterTitle = contextMeterTitle(tab.model, tab.used, tab.max, tab.pctRaw ?? tab.pct ?? 0, tab.key);
+    const meterTitle = contextMeterTitle(tab.model, tab.used, tab.max, tab.pctRaw ?? tab.pct ?? 0, tab.key, tab);
     tabEl.title = meterTitle;
 
     if (!isHome) {
@@ -3685,9 +3691,9 @@ async function updateContextMeter() {
       // but activeContextCache is keyed by suffix only (e.g. tab-79).
       const prefix = agentPrefix();
       const suffixKey = session.key?.startsWith(prefix) ? session.key.slice(prefix.length) : session.key;
-      const pct = meterFillPercentForSession(suffixKey, pctRaw, max);
+      const pct = meterFillPercentForSession(suffixKey, pctRaw, max, session);
       activeFill.style.width = pct + "%";
-      const meterTitle = contextMeterTitle(session.model || state.currentModel || "", used, max, pctRaw, suffixKey);
+      const meterTitle = contextMeterTitle(session.model || state.currentModel || "", used, max, pctRaw, suffixKey, session);
       activeFill.title = meterTitle;
       const activeMeter = activeFill.parentElement;
       if (activeMeter) activeMeter.title = meterTitle;
@@ -3703,6 +3709,9 @@ async function updateContextMeter() {
         activeTab.model = session.model || activeTab.model || "";
         activeTab.compactionCount = Math.max(0, Number(session.compactionCheckpointCount || activeTab.compactionCount || 0));
         activeTab.latestCompaction = session.latestCompactionCheckpoint || activeTab.latestCompaction || null;
+        activeTab.inputTokens = Number(session.inputTokens || 0);
+        activeTab.cacheRead = Number(session.cacheRead || 0);
+        activeTab.cacheWrite = Number(session.cacheWrite || 0);
       }
 
       const hamburgerBar = document.getElementById("hamburger-bar");
@@ -3858,13 +3867,32 @@ function getActiveContextForSession(sessionKey) {
   return { active, cachedPct, ts: u.ts || 0 };
 }
 
-// Bar-fill percent for the tab meter: prefer active-context reading when we
-// have it (always ≤ 100), otherwise fall back to the cumulative pct (also
-// capped at 100 for the bar by contextUsagePercentFill).
-function meterFillPercentForSession(sessionKey, fallbackPct, max) {
+// Compute active context from the session row exposed by sessions.list.
+// inputTokens is the last call's bare input; cacheRead/cacheWrite may be
+// undefined on stock OpenClaw and that's fine — the sum still represents
+// the most recent prompt size and is always ≤ contextTokens.
+function deriveActiveFromSession(session) {
+  if (!session) return null;
+  const input = Number(session.inputTokens || 0);
+  const cacheRead = Number(session.cacheRead || 0);
+  const cacheWrite = Number(session.cacheWrite || 0);
+  const active = input + cacheRead + cacheWrite;
+  return active > 0 ? active : null;
+}
+
+// Bar-fill percent for the tab meter. Hierarchy of trust:
+//   1) streamed active reading (most accurate — has cache breakdown)
+//   2) session-row inputTokens (+ cacheRead/cacheWrite when present)
+//   3) cumulative-derived fallbackPct (only used for the bar fill, never
+//      surfaced as a percentage in the tooltip — see contextMeterTitle)
+function meterFillPercentForSession(sessionKey, fallbackPct, max, sessionRow) {
   const active = getActiveContextForSession(sessionKey);
   if (active && max > 0) {
     return Math.max(0, Math.min(100, Math.round((active.active / max) * 100)));
+  }
+  const sessionActive = deriveActiveFromSession(sessionRow);
+  if (sessionActive !== null && max > 0) {
+    return Math.max(0, Math.min(100, Math.round((sessionActive / max) * 100)));
   }
   return contextUsagePercentFill(fallbackPct);
 }
@@ -3884,31 +3912,34 @@ function formatTokenCountShort(value) {
   return String(Math.round(safe));
 }
 
-function contextMeterTitle(model, used, max, pct, sessionKey) {
+function contextMeterTitle(model, used, max, pct, sessionKey, sessionRow) {
   const modelName = shortModelName(model || "unknown");
-  const usedSafe = Number.isFinite(Number(used)) ? Number(used) : 0;
   const maxSafe = Number.isFinite(Number(max)) ? Number(max) : 0;
-  if (maxSafe <= 0) return `${modelName}\n${formatTokenCountShort(usedSafe)} tokens`;
 
-  // Prefer active-context reading captured from chat final events:
-  // active = input + cacheRead + cacheWrite from the latest call. This is
-  // always ≤ window, unlike the cumulative session.totalTokens that can read
-  // many times the window after prompt-cache re-reads pile up.
-  const active = sessionKey ? getActiveContextForSession(sessionKey) : null;
-  if (active) {
-    const activePct = Math.round((active.active / maxSafe) * 100);
-    let body = `active ${formatTokenCountShort(active.active)}/${formatTokenCountShort(maxSafe)} (${activePct}%)`;
-    if (active.cachedPct >= 0) body += ` · ${active.cachedPct}% cached`;
-    if (usedSafe > active.active) {
-      body += `\nthroughput: ${formatTokenCountShort(usedSafe)} (cumulative across turns)`;
-    }
+  // 1) Streamed active reading (most accurate — has cache breakdown).
+  const streamed = sessionKey ? getActiveContextForSession(sessionKey) : null;
+  if (streamed && maxSafe > 0) {
+    const activePct = Math.round((streamed.active / maxSafe) * 100);
+    let body = `active ${formatTokenCountShort(streamed.active)}/${formatTokenCountShort(maxSafe)} (${activePct}%)`;
+    if (streamed.cachedPct >= 0) body += ` · ${streamed.cachedPct}% cached`;
     return `${modelName}\n${body}`;
   }
 
-  // Fallback: no streamed usage data for this session yet — match /status
-  // format so users still see something comparable to Telegram/terminal.
-  const pctSafe = Number.isFinite(Number(pct)) ? Number(pct) : Math.round((usedSafe / maxSafe) * 100);
-  return `${modelName}\n${formatTokenCountShort(usedSafe)}/${formatTokenCountShort(maxSafe)} (${pctSafe}%)`;
+  // 2) Session-row derived active: inputTokens (+ cacheRead/cacheWrite when
+  // gateway exposes them). Bounded by the model's context window and reflects
+  // the last call, which is what the user actually wants to know.
+  const sessionActive = deriveActiveFromSession(sessionRow);
+  if (sessionActive !== null && maxSafe > 0) {
+    const activePct = Math.round((sessionActive / maxSafe) * 100);
+    return `${modelName}\nactive ${formatTokenCountShort(sessionActive)}/${formatTokenCountShort(maxSafe)} (${activePct}%)`;
+  }
+
+  // 3) No per-call data yet. Don't fabricate a percentage from cumulative
+  // totalTokens — that ratio can read >100% after enough turns and is
+  // meaningless. Show only the model and a hint that a real reading is
+  // pending.
+  if (maxSafe > 0) return `${modelName}\nno call data yet — send a message to refresh`;
+  return `${modelName}`;
 }
 
 function updateModelLabel() {
