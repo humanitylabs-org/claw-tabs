@@ -7244,7 +7244,14 @@ function summarizeToolResult(result, maxLen = 280) {
   if (typeof result === "string") {
     text = result;
   } else if (result && typeof result === "object") {
-    if (Array.isArray(result.content)) {
+    // tool_result blocks normally carry the actual output in `content`. It
+    // can be either a plain string (Bash, Read, most tools) or an array of
+    // content blocks (the Anthropic multi-part shape). Handle both before
+    // falling through to JSON.stringify, otherwise a normal Bash chip ends
+    // up rendering the entire block-as-JSON in its detail line.
+    if (typeof result.content === "string") {
+      text = result.content;
+    } else if (Array.isArray(result.content)) {
       const parts = [];
       for (const c of result.content) {
         if (!c || typeof c !== "object") continue;
@@ -7253,6 +7260,7 @@ function summarizeToolResult(result, maxLen = 280) {
       text = parts.join("\n");
     }
     if (!text && typeof result.text === "string") text = result.text;
+    if (!text && typeof result.stdout === "string") text = result.stdout;
     if (!text) {
       try { text = JSON.stringify(result); } catch { text = ""; }
     }
