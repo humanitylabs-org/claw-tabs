@@ -10361,6 +10361,7 @@ const DEFAULT_OPTIONS = {
 const RECOMMENDED_MODEL_DEFAULTS = {
   model: "anthropic/claude-opus-4-7",
   fallbacks: [],
+  verbose: "on",
 };
 
 function defaultOptionLabel(key, opt) {
@@ -10496,9 +10497,10 @@ function updateDefaultsPanel() {
     '</div>';
   }
 
-  // Recommended baseline: Opus 4.7 primary, no fallbacks
+  // Recommended baseline: Opus 4.7 primary, no fallbacks, show steps = on
   const recModelOk = String(d.model || "") === RECOMMENDED_MODEL_DEFAULTS.model
-    && normalizeFallbacks(d.fallbacks || [], d.model).length === RECOMMENDED_MODEL_DEFAULTS.fallbacks.length;
+    && normalizeFallbacks(d.fallbacks || [], d.model).length === RECOMMENDED_MODEL_DEFAULTS.fallbacks.length
+    && String(d.verbose || "").toLowerCase() === RECOMMENDED_MODEL_DEFAULTS.verbose;
 
   let html = '';
   html += '<div class="hud-reliability-summary">' +
@@ -11093,17 +11095,25 @@ async function applyRecommendedModelDefaults() {
 
     const nextPrimary = RECOMMENDED_MODEL_DEFAULTS.model;
     const nextFallbacks = normalizeFallbacks(RECOMMENDED_MODEL_DEFAULTS.fallbacks, nextPrimary);
+    const nextVerbose = RECOMMENDED_MODEL_DEFAULTS.verbose;
 
     const raw = JSON.stringify({
-      agents: { defaults: { model: { primary: nextPrimary, fallbacks: nextFallbacks } } },
+      agents: {
+        defaults: {
+          model: { primary: nextPrimary, fallbacks: nextFallbacks },
+          verboseDefault: nextVerbose,
+        },
+      },
     });
     state.gatewayRestarting = true;
     await state.gateway.request("config.patch", { raw, baseHash: hash });
 
     state.defaults.model = nextPrimary;
     state.defaults.fallbacks = nextFallbacks;
+    state.defaults.verbose = nextVerbose;
     delete state.pendingDefaults.model;
     delete state.pendingDefaults.fallbacks;
+    delete state.pendingDefaults.verbose;
 
     setTimeout(() => { state.gatewayRestarting = false; }, 2000);
 
