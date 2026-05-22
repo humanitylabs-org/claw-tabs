@@ -870,6 +870,8 @@ const state = {
     compactionTruncateAfterCompaction: false,
     compactionMaxActiveTranscriptBytes: "",
     compactionReserveTokensFloor: 0,
+    cliResumeWatchdogMaxMs: 0,
+    cliFreshWatchdogMaxMs: 0,
     resetMode: "idle",
     resetAtHour: 4,
     resetIdleMinutes: 10080,
@@ -2146,6 +2148,11 @@ async function loadDefaults() {
     const compactionReserveTokensFloor = Number.isFinite(parsedReserveFloor) && parsedReserveFloor > 0
       ? Math.round(parsedReserveFloor)
       : 0;
+    const cliWatchdogCfg = ad?.cliBackends?.["claude-cli"]?.reliability?.watchdog || {};
+    const parsedResumeMax = Number(cliWatchdogCfg?.resume?.maxMs);
+    const cliResumeWatchdogMaxMs = Number.isFinite(parsedResumeMax) && parsedResumeMax > 0 ? Math.round(parsedResumeMax) : 0;
+    const parsedFreshMax = Number(cliWatchdogCfg?.fresh?.maxMs);
+    const cliFreshWatchdogMaxMs = Number.isFinite(parsedFreshMax) && parsedFreshMax > 0 ? Math.round(parsedFreshMax) : 0;
     const parsedAgentTimeoutSeconds = Number(ad?.timeoutSeconds);
     const parsedLegacyIdleTimeoutSeconds = Number(ad?.llm?.idleTimeoutSeconds);
     const resolvedAgentTimeout = Number.isFinite(parsedAgentTimeoutSeconds) && parsedAgentTimeoutSeconds > 0
@@ -2188,6 +2195,8 @@ async function loadDefaults() {
       compactionTruncateAfterCompaction,
       compactionMaxActiveTranscriptBytes,
       compactionReserveTokensFloor,
+      cliResumeWatchdogMaxMs,
+      cliFreshWatchdogMaxMs,
       resetMode,
       resetAtHour,
       resetIdleMinutes,
@@ -5306,7 +5315,7 @@ async function loadChatHistory(opts) {
     };
     const assistantHasToolCalls = (content) => {
       if (!Array.isArray(content)) return false;
-      return content.some((block) => block && typeof block === "object" && (block.type === "toolCall" || block.type === "tool_use"));
+      return content.some((block) => block && typeof block === "object" && isToolUseBlockType(block.type));
     };
 
     // Transcript-first in-flight detection for refresh/reopen recovery.
@@ -5409,7 +5418,7 @@ async function loadChatHistory(opts) {
         if (m.role === "assistant" && Array.isArray(m.content)) {
           for (const block of m.content) {
             if (!block || typeof block !== "object") continue;
-            if (block.type !== "tool_use" && block.type !== "toolCall") continue;
+            if (!isToolUseBlockType(block.type)) continue;
             const id = str(block.id, str(block.toolCallId));
             if (!id) continue;
             toolCallMetaById.set(id, {
@@ -5448,7 +5457,7 @@ async function loadChatHistory(opts) {
 
         const runId = messageRunId(m);
         const hasToolBlocks = Array.isArray(m.content)
-          && m.content.some((b) => b?.type === "tool_use" || b?.type === "toolCall");
+          && m.content.some((b) => isToolUseBlockType(b?.type) || isToolResultBlockType(b?.type));
         return {
           role: m.role,
           text: extracted.text,
@@ -6143,12 +6152,24 @@ function renderMessages(opts = {}) {
   }
   ui.messagesContainer.innerHTML = "";
   state.streamEl = null;
-  const completedToolCallIds = new Set(
-    (state.messages || [])
-      .filter((m) => m?.role === "toolResult")
-      .map((m) => str(m?.toolCallId))
-      .filter(Boolean)
-  );
+  const completedToolCallIds = new Set();
+  for (const m of state.messages || []) {
+    if (m?.role === "toolResult") {
+      const id = str(m?.toolCallId);
+      if (id) completedToolCallIds.add(id);
+      continue;
+    }
+    // Also pick up tool_result blocks embedded inside assistant content —
+    // sessions.history returns these as nested blocks (type "tool_result"
+    // with tool_use_id) rather than top-level toolResult-role messages.
+    if (m?.role === "assistant" && Array.isArray(m.contentBlocks)) {
+      for (const b of m.contentBlocks) {
+        if (!b || typeof b !== "object" || !isToolResultBlockType(b.type)) continue;
+        const id = str(b.tool_use_id, str(b.toolCallId, str(b.id)));
+        if (id) completedToolCallIds.add(id);
+      }
+    }
+  }
   let pendingUserSlashCommand = "";
   for (const msg of state.messages) {
     if (msg.role === "user") {
@@ -6184,7 +6205,7 @@ function renderMessages(opts = {}) {
 
     if (msg.role === "assistant") {
       const suppressAudio = shouldSuppressAudioPlayerForAssistant(pendingUserSlashCommand, msg);
-      const hasContentTools = msg.contentBlocks?.some(b => b.type === "tool_use" || b.type === "toolCall") || false;
+      const hasContentTools = msg.contentBlocks?.some(b => isToolUseBlockType(b?.type) || isToolResultBlockType(b?.type)) || false;
       if (hasContentTools && msg.contentBlocks) {
         for (const block of msg.contentBlocks) {
           if (block.type === "text" && block.text?.trim()) {
@@ -6239,12 +6260,39 @@ function renderMessages(opts = {}) {
               renderAudioPlayer(bubble, src);
               ui.messagesContainer.appendChild(bubble);
             }
-          } else if (block.type === "tool_use" || block.type === "toolCall") {
+          } else if (isToolUseBlockType(block.type)) {
             if (shouldShowToolEvents()) {
               const blockId = str(block.id, str(block.toolCallId));
               if (blockId && completedToolCallIds.has(blockId)) continue;
               const { label, url } = buildToolLabel(block.name || "", block.input || block.arguments || {});
               appendToolCall(label, url, false, { noScroll: true });
+            }
+          } else if (isToolResultBlockType(block.type)) {
+            if (shouldShowToolEvents()) {
+              // Embedded tool_result block — find the paired tool_use in the
+              // same message to recover the tool name when the block doesn't
+              // carry one. The result chip is rendered once per tool.
+              const matchId = str(block.tool_use_id, str(block.toolCallId, str(block.id)));
+              let toolName = str(block.name);
+              let toolArgs = {};
+              if (matchId && Array.isArray(msg.contentBlocks)) {
+                for (const sib of msg.contentBlocks) {
+                  if (!sib || typeof sib !== "object" || !isToolUseBlockType(sib.type)) continue;
+                  const sibId = str(sib.id, str(sib.toolCallId));
+                  if (sibId !== matchId) continue;
+                  if (!toolName) toolName = str(sib.name);
+                  toolArgs = sib.input || sib.arguments || {};
+                  break;
+                }
+              }
+              const { label, url } = buildToolLabel(toolName, toolArgs);
+              const detailSrc = block.content ?? block.text ?? block;
+              appendToolCall(label, url, false, {
+                toolCallId: matchId,
+                detail: shouldShowToolOutput() ? summarizeToolResult(detailSrc) : "",
+                isError: !!block.is_error || !!block.isError,
+                noScroll: true,
+              });
             }
           }
         }
@@ -6884,6 +6932,18 @@ function updateScrollBottomButton() {
 }
 
 // ─── Tool Call Display ───────────────────────────────────────────────
+
+// The OpenClaw gateway normalizes Anthropic + claude-cli tool blocks under
+// several aliases — Anthropic SDK uses "tool_use"/"tool_result", the gateway
+// historically used "toolCall"/"toolResult", and the current sessions.history
+// payload uses lowercase "toolcall"/"tool_result". Treat all variants
+// equivalently so transcripts render every tool chip regardless of source.
+function isToolUseBlockType(t) {
+  return t === "tool_use" || t === "toolCall" || t === "toolcall" || t === "tool_call";
+}
+function isToolResultBlockType(t) {
+  return t === "tool_result" || t === "toolResult" || t === "toolresult";
+}
 
 function buildToolLabel(toolName, args) {
   const a = args ?? {};
@@ -10455,6 +10515,13 @@ const RECOMMENDED_RELIABILITY_DEFAULTS = {
     timeoutSeconds: 900,
     notifyUser: true,
   },
+  // Claude CLI watchdog override — extends "no output for N seconds" timeout
+  // so Opus xhigh-thinking turns don't get killed mid-reasoning. Without this,
+  // resume turns die at 180s and fail with `chain_exhausted` (no fallback).
+  cliWatchdog: {
+    resume: { noOutputTimeoutMs: 600000, minMs: 120000, maxMs: 600000 },
+    fresh:  { minMs: 180000, maxMs: 900000 },
+  },
   schedule: {
     resetMode: "idle",
     resetAtHour: 4,
@@ -10642,6 +10709,8 @@ function updateReliabilityPanel() {
   const truncateOn = d.compactionTruncateAfterCompaction === true;
   const maxTranscriptOn = String(d.compactionMaxActiveTranscriptBytes || "") === rec.compaction.maxActiveTranscriptBytes;
   const reserveFloorOn = Number(d.compactionReserveTokensFloor || 0) === Number(rec.compaction.reserveTokensFloor || 0);
+  const cliWatchdogOn = Number(d.cliResumeWatchdogMaxMs || 0) === Number(rec.cliWatchdog.resume.maxMs)
+    && Number(d.cliFreshWatchdogMaxMs || 0) === Number(rec.cliWatchdog.fresh.maxMs);
 
   const pendingAgentTimeoutRaw = Number(state.pendingDefaults.agentTimeoutSeconds);
   const defaultAgentTimeoutRaw = Number(d.agentTimeoutSeconds);
@@ -10690,7 +10759,7 @@ function updateReliabilityPanel() {
       ? resetIdleMinutes === rec.schedule.resetIdleMinutes
       : resetAtHour === rec.schedule.resetAtHour);
   const allRecommended = contextInjectionOn && contextPruningOn && midTurnOn && truncateOn
-    && maxTranscriptOn && reserveFloorOn && timeoutsOk && scheduleOk;
+    && maxTranscriptOn && reserveFloorOn && cliWatchdogOn && timeoutsOk && scheduleOk;
 
   const hasPendingEdit = agentTimeoutPending || idleTimeoutPending
     || resetModePending || resetHourPending || resetIdlePending || heartbeatPending;
@@ -10754,7 +10823,8 @@ function updateReliabilityPanel() {
     renderReliabilityToggle('rel-midturn-precheck', 'Mid-turn overflow precheck', midTurnOn, 'Recommended ON') +
     renderReliabilityToggle('rel-truncate', 'Transcript shrink after compaction', truncateOn, 'Recommended ON') +
     renderReliabilityToggle('rel-max-transcript', 'Compaction auto-threshold', maxTranscriptOn, `Recommended ON: ${rec.compaction.maxActiveTranscriptBytes}`) +
-    renderReliabilityToggle('rel-reserve-floor', 'Reserve tokens floor', reserveFloorOn, `Recommended ON: ${Number(rec.compaction.reserveTokensFloor || 0).toLocaleString()} tokens`);
+    renderReliabilityToggle('rel-reserve-floor', 'Reserve tokens floor', reserveFloorOn, `Recommended ON: ${Number(rec.compaction.reserveTokensFloor || 0).toLocaleString()} tokens`) +
+    renderReliabilityToggle('rel-cli-watchdog', 'Extended CLI watchdog (Opus xhigh)', cliWatchdogOn, `Recommended ON: resume ${rec.cliWatchdog.resume.maxMs/1000}s / fresh ${rec.cliWatchdog.fresh.maxMs/1000}s no-output tolerance`);
 
   html += '<div class="hud-settings-divider" style="margin:6px 0"></div>' +
     renderTimeoutSelect("agentTimeoutSeconds", "Run timeout", currentAgentTimeout, agentTimeoutPending, RECOMMENDED_AGENT_TIMEOUT_SECONDS) +
@@ -10892,6 +10962,7 @@ async function applyReliabilitySettingsFromPanel() {
     const truncateOn = !!document.getElementById('rel-truncate')?.checked;
     const maxTranscriptOn = !!document.getElementById('rel-max-transcript')?.checked;
     const reserveFloorOn = !!document.getElementById('rel-reserve-floor')?.checked;
+    const cliWatchdogOn = !!document.getElementById('rel-cli-watchdog')?.checked;
 
     const contextPruningPatch = contextPruningOn
       ? { ...RECOMMENDED_RELIABILITY_DEFAULTS.contextPruning, ttl: pruningTtl }
@@ -10907,12 +10978,28 @@ async function applyReliabilitySettingsFromPanel() {
       notifyUser: true,
     };
 
+    // Note: schema validator requires `command` even though the runtime merges
+    // our partial config with the registered backend. Hard-coding "claude" matches
+    // the runtime default; the merge step keeps the rest (args, etc) intact.
+    const cliBackendsPatch = {
+      "claude-cli": {
+        command: "claude",
+        reliability: {
+          watchdog: {
+            resume: cliWatchdogOn ? RECOMMENDED_RELIABILITY_DEFAULTS.cliWatchdog.resume : null,
+            fresh: cliWatchdogOn ? RECOMMENDED_RELIABILITY_DEFAULTS.cliWatchdog.fresh : null,
+          },
+        },
+      },
+    };
+
     const rawPatch = {
       agents: {
         defaults: {
           contextInjection: contextInjectionOn ? RECOMMENDED_RELIABILITY_DEFAULTS.contextInjection : "always",
           contextPruning: contextPruningPatch,
           compaction: compactionPatch,
+          cliBackends: cliBackendsPatch,
         },
       },
     };
@@ -10927,6 +11014,8 @@ async function applyReliabilitySettingsFromPanel() {
     state.defaults.compactionTruncateAfterCompaction = truncateOn;
     state.defaults.compactionMaxActiveTranscriptBytes = maxTranscriptOn ? RECOMMENDED_RELIABILITY_DEFAULTS.compaction.maxActiveTranscriptBytes : "";
     state.defaults.compactionReserveTokensFloor = reserveFloorOn ? Number(RECOMMENDED_RELIABILITY_DEFAULTS.compaction.reserveTokensFloor || 0) : 0;
+    state.defaults.cliResumeWatchdogMaxMs = cliWatchdogOn ? Number(RECOMMENDED_RELIABILITY_DEFAULTS.cliWatchdog.resume.maxMs || 0) : 0;
+    state.defaults.cliFreshWatchdogMaxMs = cliWatchdogOn ? Number(RECOMMENDED_RELIABILITY_DEFAULTS.cliWatchdog.fresh.maxMs || 0) : 0;
 
     setTimeout(() => { state.gatewayRestarting = false; }, 2000);
     updateReliabilityPanel();
@@ -10966,6 +11055,17 @@ async function applyRecommendedReliabilityDefaults() {
           contextInjection: rec.contextInjection,
           contextPruning: rec.contextPruning,
           compaction: rec.compaction,
+          cliBackends: {
+            "claude-cli": {
+              command: "claude",
+              reliability: {
+                watchdog: {
+                  resume: rec.cliWatchdog.resume,
+                  fresh: rec.cliWatchdog.fresh,
+                },
+              },
+            },
+          },
           timeoutSeconds: rec.agentTimeoutSeconds,
           heartbeat: { every: rec.schedule.heartbeatEvery },
         },
@@ -10989,6 +11089,8 @@ async function applyRecommendedReliabilityDefaults() {
     state.defaults.compactionTruncateAfterCompaction = true;
     state.defaults.compactionMaxActiveTranscriptBytes = rec.compaction.maxActiveTranscriptBytes;
     state.defaults.compactionReserveTokensFloor = Number(rec.compaction.reserveTokensFloor || 0);
+    state.defaults.cliResumeWatchdogMaxMs = Number(rec.cliWatchdog.resume.maxMs || 0);
+    state.defaults.cliFreshWatchdogMaxMs = Number(rec.cliWatchdog.fresh.maxMs || 0);
     state.defaults.agentTimeoutSeconds = rec.agentTimeoutSeconds;
     state.defaults.llmIdleTimeoutSeconds = rec.llmIdleTimeoutSeconds;
     state.defaults.resetMode = rec.schedule.resetMode;
