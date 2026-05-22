@@ -870,9 +870,9 @@ const state = {
     compactionTruncateAfterCompaction: false,
     compactionMaxActiveTranscriptBytes: "",
     compactionReserveTokensFloor: 0,
-    resetMode: "daily",
+    resetMode: "idle",
     resetAtHour: 4,
-    resetIdleMinutes: 240,
+    resetIdleMinutes: 10080,
     heartbeatEvery: "1h",
     heartbeatSession: "main",
     heartbeatTarget: "",
@@ -2163,11 +2163,11 @@ async function loadDefaults() {
     );
 
     const resetCfg = parsed?.session?.reset || cfg?.session?.reset || {};
-    const resetMode = resetCfg?.mode === "idle" ? "idle" : "daily";
+    const resetMode = resetCfg?.mode === "daily" ? "daily" : "idle";
     const parsedAtHour = Number(resetCfg?.atHour);
     const parsedIdleMinutes = Number(resetCfg?.idleMinutes);
     const resetAtHour = Number.isFinite(parsedAtHour) ? Math.max(0, Math.min(23, Math.round(parsedAtHour))) : 4;
-    const resetIdleMinutes = Number.isFinite(parsedIdleMinutes) && parsedIdleMinutes > 0 ? Math.round(parsedIdleMinutes) : 240;
+    const resetIdleMinutes = Number.isFinite(parsedIdleMinutes) && parsedIdleMinutes > 0 ? Math.round(parsedIdleMinutes) : 10080;
 
     const heartbeatCfg = ad?.heartbeat || {};
     const heartbeatEvery = heartbeatCfg?.every || "0m";
@@ -10450,7 +10450,7 @@ const RECOMMENDED_RELIABILITY_DEFAULTS = {
   schedule: {
     resetMode: "idle",
     resetAtHour: 4,
-    resetIdleMinutes: 240,
+    resetIdleMinutes: 10080,
     heartbeatEvery: "1h",
   },
   agentTimeoutSeconds: RECOMMENDED_AGENT_TIMEOUT_SECONDS,
