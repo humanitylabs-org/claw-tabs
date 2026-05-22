@@ -3856,45 +3856,39 @@ function captureLastCallUsage(sessionKey, msg) {
   } catch {}
 }
 
-// Returns { active, cachedPct } if we have streamed data for this session,
-// otherwise null. `active` is single-call prompt size (input+cacheRead+cacheWrite).
-function getActiveContextForSession(sessionKey) {
-  const u = state.activeContextCache?.[sessionKey];
-  if (!u) return null;
-  const active = (u.input || 0) + (u.cacheRead || 0) + (u.cacheWrite || 0);
-  if (active <= 0) return null;
-  const cachedPct = Math.round(((u.cacheRead || 0) / active) * 100);
-  return { active, cachedPct, ts: u.ts || 0 };
+// Count user turns from a messages array. Counts every role==="user" entry,
+// including synthetic "Continue from where you left off" messages — those are
+// rare and the slight inflation is acceptable for a glanceable indicator.
+function countUserTurns(messages) {
+  if (!Array.isArray(messages)) return null;
+  let n = 0;
+  for (const m of messages) {
+    if (m && m.role === "user") n += 1;
+  }
+  return n;
 }
 
-// Compute active context from the session row exposed by sessions.list.
-// inputTokens is the last call's bare input; cacheRead/cacheWrite may be
-// undefined on stock OpenClaw and that's fine — the sum still represents
-// the most recent prompt size and is always ≤ contextTokens.
-function deriveActiveFromSession(session) {
-  if (!session) return null;
-  const input = Number(session.inputTokens || 0);
-  const cacheRead = Number(session.cacheRead || 0);
-  const cacheWrite = Number(session.cacheWrite || 0);
-  const active = input + cacheRead + cacheWrite;
-  return active > 0 ? active : null;
+// Returns the user-turn count for a session's cached messages, or null when
+// history hasn't been loaded for that tab yet. Active tab reads state.messages
+// (kept live by chat events); inactive tabs read state.tabCache which the
+// background warm-cache pass fills in.
+function getTabTurnCount(sessionKey) {
+  if (!sessionKey) return null;
+  if (sessionKey === state.sessionKey && Array.isArray(state.messages)) {
+    return countUserTurns(state.messages);
+  }
+  const cached = state.tabCache?.[sessionKey]?.messages;
+  return countUserTurns(cached);
 }
 
-// Bar-fill percent for the tab meter. Hierarchy of trust:
-//   1) streamed active reading (most accurate — has cache breakdown)
-//   2) session-row inputTokens (+ cacheRead/cacheWrite when present)
-//   3) cumulative-derived fallbackPct (only used for the bar fill, never
-//      surfaced as a percentage in the tooltip — see contextMeterTitle)
-function meterFillPercentForSession(sessionKey, fallbackPct, max, sessionRow) {
-  const active = getActiveContextForSession(sessionKey);
-  if (active && max > 0) {
-    return Math.max(0, Math.min(100, Math.round((active.active / max) * 100)));
-  }
-  const sessionActive = deriveActiveFromSession(sessionRow);
-  if (sessionActive !== null && max > 0) {
-    return Math.max(0, Math.min(100, Math.round((sessionActive / max) * 100)));
-  }
-  return contextUsagePercentFill(fallbackPct);
+// Bar-fill percent for the tab meter. Tracks the same turn count that the
+// tooltip surfaces, mapped to 0–100 with a soft cap at 100 turns so the bar
+// visualization moves with conversation length. Returns 0 when history hasn't
+// been loaded yet (the meter degrades to an empty line, never a fake percentage).
+function meterFillPercentForSession(sessionKey, _fallbackPct, _max, _sessionRow) {
+  const turns = getTabTurnCount(sessionKey);
+  if (turns === null) return 0;
+  return Math.max(0, Math.min(100, turns));
 }
 
 // Matches OpenClaw's gateway-side formatTokenCount (status-message)
@@ -3912,34 +3906,16 @@ function formatTokenCountShort(value) {
   return String(Math.round(safe));
 }
 
+// Meter tooltip shows the session's user-turn count — the simplest honest
+// "how big is this conversation" signal we can compute purely client-side.
+// We deliberately don't show token ratios: cumulative totalTokens / contextTokens
+// can read >100% after compactions, and inputTokens alone under-counts when
+// prompt caching is active. Turns are unambiguous.
 function contextMeterTitle(model, used, max, pct, sessionKey, sessionRow) {
   const modelName = shortModelName(model || "unknown");
-  const maxSafe = Number.isFinite(Number(max)) ? Number(max) : 0;
-
-  // 1) Streamed active reading (most accurate — has cache breakdown).
-  const streamed = sessionKey ? getActiveContextForSession(sessionKey) : null;
-  if (streamed && maxSafe > 0) {
-    const activePct = Math.round((streamed.active / maxSafe) * 100);
-    let body = `active ${formatTokenCountShort(streamed.active)}/${formatTokenCountShort(maxSafe)} (${activePct}%)`;
-    if (streamed.cachedPct >= 0) body += ` · ${streamed.cachedPct}% cached`;
-    return `${modelName}\n${body}`;
-  }
-
-  // 2) Session-row derived active: inputTokens (+ cacheRead/cacheWrite when
-  // gateway exposes them). Bounded by the model's context window and reflects
-  // the last call, which is what the user actually wants to know.
-  const sessionActive = deriveActiveFromSession(sessionRow);
-  if (sessionActive !== null && maxSafe > 0) {
-    const activePct = Math.round((sessionActive / maxSafe) * 100);
-    return `${modelName}\nactive ${formatTokenCountShort(sessionActive)}/${formatTokenCountShort(maxSafe)} (${activePct}%)`;
-  }
-
-  // 3) No per-call data yet. Don't fabricate a percentage from cumulative
-  // totalTokens — that ratio can read >100% after enough turns and is
-  // meaningless. Show only the model and a hint that a real reading is
-  // pending.
-  if (maxSafe > 0) return `${modelName}\nno call data yet — send a message to refresh`;
-  return `${modelName}`;
+  const turns = getTabTurnCount(sessionKey);
+  if (turns === null) return `${modelName}`;
+  return `${modelName}\n${turns} ${turns === 1 ? "turn" : "turns"}`;
 }
 
 function updateModelLabel() {
