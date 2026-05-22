@@ -1534,7 +1534,7 @@
     [data-theme="light"] .openclaw-input-wrapper { background: var(--background-secondary); border-color: var(--background-modifier-border); }
     [data-theme="light"] #message-input { color: var(--text-normal); }
   </style>
-  <link rel="stylesheet" href="/clawtabs/theme.css?v=11">
+  <link rel="stylesheet" href="/clawtabs/theme.css?v=12">
   <!-- Cal redesign: final spacing fix (inline = highest cascade priority) -->
   <style id="cal-spacing-fix">
     /* Every section toggle — tight spacing, no exceptions */
@@ -2094,6 +2094,7 @@
           <div class="openclaw-attach-preview oc-hidden" id="attach-preview"></div>
           <!-- Model label bar -->
           <div class="openclaw-model-bar">
+            <span class="bar-chip bar-conn-chip" id="bar-conn-chip" title="Connection status" style="display:none"></span>
             <button class="bar-chip bar-chip-btn" id="bar-menu" title="Command menu">menu</button>
             <span class="bar-sep">·</span>
             <span class="openclaw-model-label" id="model-label" title="Click to change model"></span>
@@ -2122,7 +2123,7 @@
 
   </div>
 
-  <script src="/clawtabs/app.js?v=34"></script>
+  <script src="/clawtabs/app.js?v=35"></script>
   <!-- Connect Modal (styles inlined to avoid cache issues) -->
   <style>
     #connect-modal-overlay{display:none;position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.7);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);justify-content:center;align-items:center;padding:24px}

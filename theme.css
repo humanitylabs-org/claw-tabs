@@ -5667,3 +5667,18 @@ html body .oc-float-export:hover {
   font-size: inherit;
   line-height: inherit;
 }
+
+/* Composer-bar connection chip — only visible when offline/reconnecting. */
+.openclaw-model-bar .bar-conn-chip {
+  letter-spacing: 0.02em;
+}
+.openclaw-model-bar .bar-conn-chip.bar-conn-chip-warn {
+  color: #ffb547 !important;
+  background: rgba(255, 181, 71, 0.10) !important;
+  border-color: rgba(255, 181, 71, 0.22) !important;
+}
+.openclaw-model-bar .bar-conn-chip.bar-conn-chip-error {
+  color: #ff6b6b !important;
+  background: rgba(255, 107, 107, 0.10) !important;
+  border-color: rgba(255, 107, 107, 0.22) !important;
+}

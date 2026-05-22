@@ -3981,8 +3981,35 @@ function updateBarControls() {
   if (homePairEl) homePairEl.style.display = "none";
   if (homePairSep) homePairSep.style.display = "none";
 
+  updateConnectionChip();
   updateCompactionChip();
   updateReleaseBadge();
+}
+
+// Persistent connection chip in the model bar. Hidden when the WebSocket is
+// healthy; turns yellow when reconnecting; red when disconnected. Lives in
+// the composer bar so users on mobile don't miss it (the existing top
+// reconnect banner can scroll off-screen).
+function updateConnectionChip() {
+  const chip = document.getElementById("bar-conn-chip");
+  if (!chip) return;
+  const connected = !!state.gateway?.connected;
+  const reconnecting = !!state.reconnecting || !!state.gatewayRestarting;
+  if (connected) {
+    chip.style.display = "none";
+    chip.classList.remove("bar-conn-chip-warn", "bar-conn-chip-error");
+    return;
+  }
+  chip.style.display = "";
+  if (reconnecting) {
+    chip.textContent = state.gatewayRestarting ? "gateway restarting…" : "reconnecting…";
+    chip.classList.add("bar-conn-chip-warn");
+    chip.classList.remove("bar-conn-chip-error");
+  } else {
+    chip.textContent = "offline";
+    chip.classList.add("bar-conn-chip-error");
+    chip.classList.remove("bar-conn-chip-warn");
+  }
 }
 
 function updateCompactionChip() {
@@ -5550,6 +5577,23 @@ async function loadChatHistory(opts) {
       ? state.messages
       : (state.tabCache[targetKey]?.messages || []);
     const changed = !messagesEquivalent(parsed, previous);
+
+    // Clobber guard: a polled history fetch can land WHILE the user has a send
+    // in flight (Android Chrome kills the PWA, wakes back up, fires a history
+    // refetch). If the gateway hasn't persisted the in-flight message yet, the
+    // parsed transcript is strictly shorter than what's in memory and would
+    // wipe the user's just-sent bubble + assistant reply. Reject the smaller
+    // payload until the next poll catches up. Iphone Safari almost never cold-
+    // starts so this race is invisible there; Android is where it manifests.
+    const sendInFlight = state.sending
+      || state.streams.has(targetKey)
+      || state.historyInFlightStartedAt?.[targetKey];
+    const isStrictlySmaller = Array.isArray(parsed) && Array.isArray(previous)
+      && parsed.length < previous.length;
+    if (sendInFlight && isStrictlySmaller) {
+      if (!background) hideLoading();
+      return;
+    }
 
     // Cache the result
     state.tabCache[targetKey] = { messages: parsed, timestamp: Date.now() };
@@ -10404,8 +10448,9 @@ const RECOMMENDED_RELIABILITY_DEFAULTS = {
     notifyUser: true,
   },
   schedule: {
-    resetMode: "daily",
+    resetMode: "idle",
     resetAtHour: 4,
+    resetIdleMinutes: 240,
     heartbeatEvery: "1h",
   },
   agentTimeoutSeconds: RECOMMENDED_AGENT_TIMEOUT_SECONDS,
@@ -10631,8 +10676,10 @@ function updateReliabilityPanel() {
   const timeoutsOk = Number(currentAgentTimeout) === Number(rec.agentTimeoutSeconds)
     && Number(currentIdleTimeout) === Number(rec.llmIdleTimeoutSeconds);
   const scheduleOk = resetMode === rec.schedule.resetMode
-    && resetAtHour === rec.schedule.resetAtHour
-    && heartbeatEvery === rec.schedule.heartbeatEvery;
+    && heartbeatEvery === rec.schedule.heartbeatEvery
+    && (rec.schedule.resetMode === "idle"
+      ? resetIdleMinutes === rec.schedule.resetIdleMinutes
+      : resetAtHour === rec.schedule.resetAtHour);
   const allRecommended = contextInjectionOn && contextPruningOn && midTurnOn && truncateOn
     && maxTranscriptOn && reserveFloorOn && timeoutsOk && scheduleOk;
 
@@ -10915,7 +10962,9 @@ async function applyRecommendedReliabilityDefaults() {
         },
       },
       session: {
-        reset: { mode: rec.schedule.resetMode, atHour: rec.schedule.resetAtHour },
+        reset: rec.schedule.resetMode === "idle"
+          ? { mode: "idle", idleMinutes: rec.schedule.resetIdleMinutes }
+          : { mode: "daily", atHour: rec.schedule.resetAtHour },
       },
     };
 
@@ -10935,6 +10984,9 @@ async function applyRecommendedReliabilityDefaults() {
     state.defaults.llmIdleTimeoutSeconds = rec.llmIdleTimeoutSeconds;
     state.defaults.resetMode = rec.schedule.resetMode;
     state.defaults.resetAtHour = rec.schedule.resetAtHour;
+    if (Number.isFinite(Number(rec.schedule.resetIdleMinutes))) {
+      state.defaults.resetIdleMinutes = Number(rec.schedule.resetIdleMinutes);
+    }
     state.defaults.heartbeatEvery = rec.schedule.heartbeatEvery;
 
     // Recommended apply blows away any local pending edits for the merged keys.
@@ -12776,11 +12828,27 @@ initApp().catch((err) => {
   }
 });
 
-// Clean up any old service worker (was causing stale cache issues)
+// Register the app-shell service worker so cold starts survive flaky network
+// (Android Doze, cellular handoffs). The SW only caches static assets — it
+// never intercepts the gateway WebSocket or API calls. Scope is /clawtabs/
+// to match the PWA manifest scope.
 if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.getRegistrations().then((regs) => {
-    if (regs.length > 0) {
-      regs.forEach((r) => r.unregister());
-    }
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register(withBasePath("sw.js"), { scope: APP_BASE_PATH + "/" })
+      .then((reg) => {
+        // Auto-activate a waiting worker after a deploy so users don't need a
+        // second hard reload to pick up the new shell.
+        if (reg.waiting) reg.waiting.postMessage("SKIP_WAITING");
+        reg.addEventListener("updatefound", () => {
+          const next = reg.installing;
+          if (!next) return;
+          next.addEventListener("statechange", () => {
+            if (next.state === "installed" && navigator.serviceWorker.controller) {
+              next.postMessage("SKIP_WAITING");
+            }
+          });
+        });
+      })
+      .catch((err) => console.warn("SW registration failed:", err));
   });
 }
