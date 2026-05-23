@@ -4053,8 +4053,99 @@ function updateBarControls() {
 
   updateConnectionChip();
   updateCompactionChip();
+  updateContextNotice();
   updateReleaseBadge();
 }
+
+// ── Context-usage notice ────────────────────────────────────────────
+// Mirror of OpenClaw control UI's context-notice (dist/control-ui/.../index-*.js):
+// at >=85% the chip turns red, at >=90% we surface a "Compact" button that
+// calls sessions.compact. Formula matches OpenClaw exactly so the numbers
+// line up between the two UIs.
+const CONTEXT_NOTICE_WARN_RATIO = 0.85;
+const CONTEXT_NOTICE_COMPACT_RATIO = 0.9;
+
+function formatContextTokens(n) {
+  if (!Number.isFinite(n) || n < 0) return "0";
+  if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, "") + "k";
+  return String(n);
+}
+
+function computeContextNotice() {
+  const tabKey = state.sessionKey || "main";
+  const tab = state.tabSessions.find((t) => t.key === tabKey);
+  if (!tab) return null;
+  const used = Number(tab.used) || 0;
+  const max = Number(tab.max) || 0;
+  if (max <= 0 || used <= 0) return null;
+  const ratio = used / max;
+  const pct = Math.min(Math.round(ratio * 100), 100);
+  return {
+    pct,
+    used,
+    max,
+    detail: `${formatContextTokens(used)} / ${formatContextTokens(max)}`,
+    warning: ratio >= CONTEXT_NOTICE_WARN_RATIO,
+    compactRecommended: ratio >= CONTEXT_NOTICE_COMPACT_RATIO,
+  };
+}
+
+function updateContextNotice() {
+  const el = document.getElementById("oc-context-notice");
+  if (!el) return;
+  const data = computeContextNotice();
+  if (!data || !data.compactRecommended) {
+    el.classList.add("oc-hidden");
+    el.innerHTML = "";
+    return;
+  }
+  const tabKey = state.sessionKey || "main";
+  const busy = !!state.compactionInFlightBySession[tabKey] || !!state._compactBusyByTab?.[tabKey];
+  el.classList.remove("oc-hidden");
+  el.classList.toggle("oc-context-notice--warning", !!data.warning);
+  const safeDetail = escapeHtmlChat(data.detail);
+  el.innerHTML =
+    '<svg class="oc-context-notice__icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+      '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" />' +
+      '<line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />' +
+    '</svg>' +
+    `<span class="oc-context-notice__label">${data.pct}% context used</span>` +
+    `<span class="oc-context-notice__detail">${safeDetail}</span>` +
+    `<button type="button" class="oc-context-notice__action${busy ? " oc-context-notice__action--busy" : ""}" ` +
+      `${busy ? "disabled" : ""} onclick="compactCurrentSession()">` +
+      '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">' +
+        '<polyline points="4 14 10 14 10 20" /><polyline points="20 10 14 10 14 4" />' +
+        '<line x1="14" y1="10" x2="21" y2="3" /><line x1="3" y1="21" x2="10" y2="14" />' +
+      '</svg>' +
+      `${busy ? "Compacting…" : "Compact"}` +
+    '</button>';
+}
+
+async function compactCurrentSession() {
+  if (!state.gateway?.connected) return;
+  const tabKey = state.sessionKey || "main";
+  state._compactBusyByTab = state._compactBusyByTab || {};
+  if (state._compactBusyByTab[tabKey]) return;
+  state._compactBusyByTab[tabKey] = true;
+  updateContextNotice();
+  try {
+    await state.gateway.request("sessions.compact", {
+      key: prefixedSessionKeyForTab(tabKey),
+    });
+    showBanner("Compaction started");
+    setTimeout(() => hideBanner(), 2500);
+    await updateContextMeter();
+  } catch (err) {
+    console.warn("Manual compaction failed:", err);
+    showBanner("Compaction failed: " + (err?.message || err));
+    setTimeout(() => hideBanner(), 4000);
+  } finally {
+    state._compactBusyByTab[tabKey] = false;
+    updateContextNotice();
+  }
+}
+window.compactCurrentSession = compactCurrentSession;
 
 // Persistent connection chip in the model bar. Hidden when the WebSocket is
 // healthy; turns yellow when reconnecting; red when disconnected. Lives in
