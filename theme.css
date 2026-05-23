@@ -5288,10 +5288,10 @@ body.theme-wallpaper #dashboard {
   justify-content: center;
   padding: 6px max(12px, calc(50% - 410px)) 4px;
 }
-.oc-memory-flush-pill > * {
+.oc-memory-flush-pill-inner {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   padding: 6px 14px;
   font-size: 12px;
   font-weight: 500;

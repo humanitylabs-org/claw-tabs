@@ -6380,35 +6380,68 @@ function isGatewayMemoryFlushUserMessage(msg) {
   return text.startsWith(GATEWAY_MEMORY_FLUSH_PREFIX);
 }
 
-// True if state.messages has a pre-compaction memory-flush user prompt with
-// no matching NO_REPLY-style assistant response after it. This is the window
-// where the agent is mid-flush and the chat would otherwise look frozen.
+// True while a pre-compaction memory-flush prompt is sitting in the latest
+// turn without a recognized completion signal. "Completion" means any of:
+//   * NO_REPLY-style assistant sentinel (Claude's typical response)
+//   * any assistant text response after the prompt (gpt-5.5 sometimes
+//     replies with prose instead of NO_REPLY)
+//   * any user message after the prompt (a new turn started)
+//   * the stream for this session has ended AND the prompt is >10s old
+//   * hard 5-minute cap so a forgotten flush never sticks
 function isMemoryFlushInProgress() {
   const msgs = state.messages || [];
+  const tabKey = state.sessionKey || "main";
   let flushIdx = -1;
+  let flushTimestamp = 0;
   for (let i = msgs.length - 1; i >= 0; i--) {
-    if (isGatewayMemoryFlushUserMessage(msgs[i])) { flushIdx = i; break; }
+    if (isGatewayMemoryFlushUserMessage(msgs[i])) {
+      flushIdx = i;
+      flushTimestamp = Number(msgs[i]?.timestamp) || 0;
+      break;
+    }
   }
   if (flushIdx < 0) return false;
   for (let i = flushIdx + 1; i < msgs.length; i++) {
-    if (isSuppressedControlAssistantMessage(msgs[i])) return false;
+    const m = msgs[i];
+    if (!m) continue;
+    if (m.role === "user") return false;
+    if (isSuppressedControlAssistantMessage(m)) return false;
+    if (m.role === "assistant") {
+      const text = extractMessageDisplayText(m).trim();
+      if (text) return false;
+    }
   }
+  const ageMs = flushTimestamp ? Date.now() - flushTimestamp : 0;
+  if (!state.streams.has(tabKey) && ageMs > 10_000) return false;
+  if (ageMs > 5 * 60 * 1000) return false;
   return true;
+}
+
+function ensureMemoryFlushPoller() {
+  if (state._memoryFlushPoller) return;
+  state._memoryFlushPoller = setInterval(() => updateMemoryFlushIndicator(), 3000);
 }
 
 function updateMemoryFlushIndicator() {
   const pill = document.getElementById("oc-memory-flush-pill");
   if (!pill) return;
   if (isMemoryFlushInProgress()) {
+    ensureMemoryFlushPoller();
     pill.classList.remove("oc-hidden");
     pill.innerHTML =
-      '<span class="oc-memory-flush-spinner" aria-hidden="true">✶</span>' +
-      '<span>Organizing my notes…</span>';
+      '<span class="oc-memory-flush-pill-inner">' +
+        '<span class="oc-memory-flush-spinner" aria-hidden="true">✶</span>' +
+        '<span>Organizing my notes…</span>' +
+      '</span>';
     document.body.classList.add("oc-memory-flush-active");
   } else {
     pill.classList.add("oc-hidden");
     pill.innerHTML = "";
     document.body.classList.remove("oc-memory-flush-active");
+    if (state._memoryFlushPoller) {
+      clearInterval(state._memoryFlushPoller);
+      state._memoryFlushPoller = null;
+    }
   }
 }
 
