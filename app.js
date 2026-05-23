@@ -2093,6 +2093,7 @@ async function recoverFromEventGap(info) {
   state.runToSession.clear();
   clearWorkingSince();
   state.streamEl = null;
+  state.streamTextEl = null;
   setSendButtonStopMode(false);
   hideBanner();
   ui.typingIndicator.classList.add("oc-hidden");
@@ -3416,6 +3417,7 @@ async function switchTab(tab, opts = {}) {
   saveAttachmentDraft();
 
   state.streamEl = null;
+  state.streamTextEl = null;
   ui.typingIndicator.classList.add("oc-hidden");
   setSendButtonStopMode(false);
   hideBanner();
@@ -3615,6 +3617,7 @@ async function createNewTab() {
     void patchSessionLabelWithRetry(sessionKey, sessionKey).catch(() => {});
 
     state.streamEl = null;
+    state.streamTextEl = null;
     ui.typingIndicator.classList.add("oc-hidden");
     setSendButtonStopMode(false);
     hideBanner();
@@ -6509,6 +6512,7 @@ function renderMessages(opts = {}) {
   }
   ui.messagesContainer.innerHTML = "";
   state.streamEl = null;
+  state.streamTextEl = null;
   const completedToolCallIds = new Set();
   for (const m of state.messages || []) {
     if (m?.role === "toolResult") {
@@ -8055,6 +8059,7 @@ function finishStream(sessionKey) {
   if (sk === state.sessionKey) {
     hideBanner();
     state.streamEl = null;
+    state.streamTextEl = null;
     setSendButtonStopMode(false);
     ui.typingIndicator.classList.add("oc-hidden");
     renderTypingLabel(STATUS_WORKING, sk);
@@ -8097,20 +8102,31 @@ function updateStreamBubble() {
     if (state.streamEl) {
       state.streamEl.remove();
       state.streamEl = null;
+      state.streamTextEl = null;
     }
     return;
   }
   if (!state.streamEl) {
     state.streamEl = document.createElement("div");
     state.streamEl.className = "openclaw-msg openclaw-msg-assistant openclaw-streaming";
+    state.streamTextEl = document.createElement("div");
+    state.streamTextEl.className = "openclaw-msg-text";
+    state.streamEl.appendChild(state.streamTextEl);
     ui.messagesContainer.appendChild(state.streamEl);
+  } else if (!state.streamTextEl) {
+    // Re-attach text element if the bubble was created without one (legacy).
+    state.streamTextEl = state.streamEl.querySelector(".openclaw-msg-text");
+    if (!state.streamTextEl) {
+      state.streamTextEl = document.createElement("div");
+      state.streamTextEl.className = "openclaw-msg-text";
+      state.streamEl.appendChild(state.streamTextEl);
+    }
   }
-  state.streamEl.innerHTML = "";
-  const textDiv = document.createElement("div");
-  textDiv.className = "openclaw-msg-text";
-  textDiv.innerHTML = formatMarkdown(visibleText);
-  makeListMarkersSelectable(textDiv);
-  state.streamEl.appendChild(textDiv);
+  // Single in-place update — no clear-then-append step that would otherwise
+  // give the browser a chance to paint an empty bubble between operations.
+  // That clear-then-append was the source of the per-delta flicker.
+  state.streamTextEl.innerHTML = formatMarkdown(visibleText);
+  makeListMarkersSelectable(state.streamTextEl);
   if (shouldStick) scrollToBottom(true);
 }
 
