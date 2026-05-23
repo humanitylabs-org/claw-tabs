@@ -2158,6 +2158,12 @@ async function loadDefaults() {
     const cliResumeWatchdogMaxMs = Number.isFinite(parsedResumeMax) && parsedResumeMax > 0 ? Math.round(parsedResumeMax) : 0;
     const parsedFreshMax = Number(cliWatchdogCfg?.fresh?.maxMs);
     const cliFreshWatchdogMaxMs = Number.isFinite(parsedFreshMax) && parsedFreshMax > 0 ? Math.round(parsedFreshMax) : 0;
+    // `claude-cli` is a provider/backend ID, not a registered harness — pinning
+    // it via agentRuntime.id triggers MissingAgentHarnessError noise in lane tasks.
+    const modelsCfg = ad?.models && typeof ad.models === "object" ? ad.models : {};
+    const claudeCliHarnessPins = Object.entries(modelsCfg)
+      .filter(([, m]) => String(m?.agentRuntime?.id || "").toLowerCase() === "claude-cli")
+      .map(([ref]) => ref);
     const parsedAgentTimeoutSeconds = Number(ad?.timeoutSeconds);
     const parsedLegacyIdleTimeoutSeconds = Number(ad?.llm?.idleTimeoutSeconds);
     const resolvedAgentTimeout = Number.isFinite(parsedAgentTimeoutSeconds) && parsedAgentTimeoutSeconds > 0
@@ -2202,6 +2208,7 @@ async function loadDefaults() {
       compactionReserveTokensFloor,
       cliResumeWatchdogMaxMs,
       cliFreshWatchdogMaxMs,
+      claudeCliHarnessPins,
       resetMode,
       resetAtHour,
       resetIdleMinutes,
@@ -10751,6 +10758,7 @@ function updateReliabilityPanel() {
   const reserveFloorOn = Number(d.compactionReserveTokensFloor || 0) === Number(rec.compaction.reserveTokensFloor || 0);
   const cliWatchdogOn = Number(d.cliResumeWatchdogMaxMs || 0) === Number(rec.cliWatchdog.resume.maxMs)
     && Number(d.cliFreshWatchdogMaxMs || 0) === Number(rec.cliWatchdog.fresh.maxMs);
+  const harnessPinsOk = !(Array.isArray(d.claudeCliHarnessPins) && d.claudeCliHarnessPins.length > 0);
 
   const pendingAgentTimeoutRaw = Number(state.pendingDefaults.agentTimeoutSeconds);
   const defaultAgentTimeoutRaw = Number(d.agentTimeoutSeconds);
@@ -10799,7 +10807,7 @@ function updateReliabilityPanel() {
       ? resetIdleMinutes === rec.schedule.resetIdleMinutes
       : resetAtHour === rec.schedule.resetAtHour);
   const allRecommended = contextInjectionOn && contextPruningOn && midTurnOn && truncateOn
-    && maxTranscriptOn && reserveFloorOn && cliWatchdogOn && timeoutsOk && scheduleOk;
+    && maxTranscriptOn && reserveFloorOn && cliWatchdogOn && harnessPinsOk && timeoutsOk && scheduleOk;
 
   const hasPendingEdit = agentTimeoutPending || idleTimeoutPending
     || resetModePending || resetHourPending || resetIdlePending || heartbeatPending;
@@ -11033,6 +11041,13 @@ async function applyReliabilitySettingsFromPanel() {
       },
     };
 
+    // Heal any bad `agentRuntime.id = "claude-cli"` pins (never a valid state — it's
+    // a provider ID, not a registered harness, and produces MissingAgentHarnessError noise).
+    const badPins = Array.isArray(state.defaults.claudeCliHarnessPins) ? state.defaults.claudeCliHarnessPins : [];
+    const modelsPatch = badPins.length
+      ? Object.fromEntries(badPins.map((ref) => [ref, { agentRuntime: null }]))
+      : undefined;
+
     const rawPatch = {
       agents: {
         defaults: {
@@ -11040,6 +11055,7 @@ async function applyReliabilitySettingsFromPanel() {
           contextPruning: contextPruningPatch,
           compaction: compactionPatch,
           cliBackends: cliBackendsPatch,
+          ...(modelsPatch ? { models: modelsPatch } : {}),
         },
       },
     };
@@ -11047,6 +11063,7 @@ async function applyReliabilitySettingsFromPanel() {
     state.gatewayRestarting = true;
     await state.gateway.request("config.patch", { raw: JSON.stringify(rawPatch), baseHash: hash });
 
+    if (badPins.length) state.defaults.claudeCliHarnessPins = [];
     state.defaults.contextInjection = contextInjectionOn ? RECOMMENDED_RELIABILITY_DEFAULTS.contextInjection : "always";
     state.defaults.contextPruningMode = contextPruningOn ? "cache-ttl" : "off";
     state.defaults.contextPruningTtl = contextPruningOn ? pruningTtl : "";
@@ -11089,6 +11106,13 @@ async function applyRecommendedReliabilityDefaults() {
     //   agents.defaults.contextInjection / contextPruning / compaction
     //   session.reset                           ← daily/idle reset
     // The "LLM idle watchdog" is a client-only preference stored in localStorage.
+    // Heal any bad `agentRuntime.id = "claude-cli"` pins — see notes in
+    // applyReliabilitySettingsFromPanel.
+    const badPins = Array.isArray(state.defaults.claudeCliHarnessPins) ? state.defaults.claudeCliHarnessPins : [];
+    const modelsPatch = badPins.length
+      ? Object.fromEntries(badPins.map((ref) => [ref, { agentRuntime: null }]))
+      : undefined;
+
     const rawPatch = {
       agents: {
         defaults: {
@@ -11106,6 +11130,7 @@ async function applyRecommendedReliabilityDefaults() {
               },
             },
           },
+          ...(modelsPatch ? { models: modelsPatch } : {}),
           timeoutSeconds: rec.agentTimeoutSeconds,
           heartbeat: { every: rec.schedule.heartbeatEvery },
         },
@@ -11122,6 +11147,7 @@ async function applyRecommendedReliabilityDefaults() {
 
     try { localStorage.setItem(LLM_IDLE_TIMEOUT_STORAGE_KEY, String(rec.llmIdleTimeoutSeconds)); } catch {}
 
+    if (badPins.length) state.defaults.claudeCliHarnessPins = [];
     state.defaults.contextInjection = rec.contextInjection;
     state.defaults.contextPruningMode = rec.contextPruning.mode;
     state.defaults.contextPruningTtl = rec.contextPruning.ttl;
