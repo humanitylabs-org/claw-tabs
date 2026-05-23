@@ -5636,16 +5636,21 @@ async function loadChatHistory(opts) {
     // Clobber guard: a polled history fetch can land WHILE the user has a send
     // in flight (Android Chrome kills the PWA, wakes back up, fires a history
     // refetch). If the gateway hasn't persisted the in-flight message yet, the
-    // parsed transcript is strictly shorter than what's in memory and would
-    // wipe the user's just-sent bubble + assistant reply. Reject the smaller
-    // payload until the next poll catches up. Iphone Safari almost never cold-
-    // starts so this race is invisible there; Android is where it manifests.
+    // parsed transcript can be shorter — or, when assistant tool calls land
+    // before the user message commits, it can be LONGER yet still missing the
+    // user bubble. Reject either kind of incomplete payload until the next poll
+    // catches up. Iphone Safari almost never cold-starts so this race is
+    // invisible there; Android is where it manifests.
     const sendInFlight = state.sending
       || state.streams.has(targetKey)
       || state.historyInFlightStartedAt?.[targetKey];
+    const countRole = (arr, role) => Array.isArray(arr)
+      ? arr.reduce((n, m) => n + (m?.role === role ? 1 : 0), 0)
+      : 0;
     const isStrictlySmaller = Array.isArray(parsed) && Array.isArray(previous)
       && parsed.length < previous.length;
-    if (sendInFlight && isStrictlySmaller) {
+    const losesUserBubble = countRole(parsed, "user") < countRole(previous, "user");
+    if (sendInFlight && (isStrictlySmaller || losesUserBubble)) {
       if (!background) hideLoading();
       return;
     }
