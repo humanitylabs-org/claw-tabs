@@ -5279,6 +5279,16 @@ body.theme-wallpaper #dashboard {
   max-width: 100%;
 }
 
+/* Archived messages: pre-compaction transcript reconstructed from the
+   local history cache. Renders at reduced opacity so users can still scroll
+   back through them without confusing them with the live conversation. */
+.openclaw-msg-archived {
+  opacity: 0.55;
+}
+.openclaw-msg-archived:hover {
+  opacity: 0.85;
+}
+
 .openclaw-msg-text {
   line-height: var(--oc-leading-body);
 }

@@ -3484,6 +3484,7 @@ function updateMobileTabLabelInstant(tab) {
 async function resetTab(tab) {
   if (!state.gateway?.connected) return;
   resetTabRenameState(tab.key, true);
+  clearHistoryCache(tab.key);
   delete state.tabCache[tab.key];
   clearWorkSummaries(tab.key);
   const isHome = tab.key === "main";
@@ -3529,6 +3530,7 @@ async function closeTab(tab, currentKey) {
   delete state.queueInFlightBySession[tab.key];
   clearCompactionStateForTab(tab.key);
   persistMessageQueue();
+  clearHistoryCache(tab.key);
   delete state.tabCache[tab.key];
   clearWorkSummaries(tab.key);
   finishStream(tab.key);
@@ -5328,6 +5330,66 @@ function recordWorkSummary(sessionKey, runId, durationMs, outcome = "completed")
 
 // ─── Chat Functions ──────────────────────────────────────────────────
 
+// ── Persistent message-history cache ─────────────────────────────────
+// When the gateway compacts a session, older messages disappear from chat.history
+// responses. We cache the rendered transcript in localStorage so those messages
+// remain visible (grayed-out via _isArchived) when we scroll back — same idea
+// as PinchChat's IndexedDB cache, kept simpler with localStorage.
+const HISTORY_CACHE_KEY_PREFIX = "clawtabs.msgcache.v1.";
+const HISTORY_CACHE_MAX_MSGS = 200;
+
+function historyCacheStorageKey(sessionKey) {
+  return HISTORY_CACHE_KEY_PREFIX + sessionKey;
+}
+
+function loadHistoryCache(sessionKey) {
+  try {
+    const raw = localStorage.getItem(historyCacheStorageKey(sessionKey));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch { return []; }
+}
+
+function saveHistoryCache(sessionKey, messages) {
+  try {
+    if (!Array.isArray(messages) || messages.length === 0) return;
+    const capped = messages.slice(-HISTORY_CACHE_MAX_MSGS);
+    localStorage.setItem(historyCacheStorageKey(sessionKey), JSON.stringify(capped));
+  } catch { /* quota or serialization issues — fail silent */ }
+}
+
+function clearHistoryCache(sessionKey) {
+  try { localStorage.removeItem(historyCacheStorageKey(sessionKey)); } catch {}
+}
+
+function historyCacheIdentity(m) {
+  if (!m || typeof m !== "object") return "";
+  const role = m.role || "";
+  const ts = Number(m.timestamp) || 0;
+  let text = "";
+  if (typeof m.text === "string") text = m.text;
+  else if (typeof m.content === "string") text = m.content;
+  else if (Array.isArray(m.content)) {
+    for (const b of m.content) {
+      if (b && b.type === "text" && typeof b.text === "string") text += b.text;
+    }
+  }
+  return `${role}|${ts}|${text.slice(0, 200)}`;
+}
+
+function mergeHistoryWithCache(gatewayMessages, cachedMessages) {
+  const gw = Array.isArray(gatewayMessages) ? gatewayMessages : [];
+  const cached = Array.isArray(cachedMessages) ? cachedMessages : [];
+  if (cached.length === 0) return gw;
+  const gwIds = new Set(gw.map(historyCacheIdentity));
+  const archived = cached
+    .filter((m) => !gwIds.has(historyCacheIdentity(m)))
+    .map((m) => ({ ...m, _isArchived: true }));
+  if (archived.length === 0) return gw;
+  return [...archived, ...gw];
+}
+
 async function loadChatHistory(opts) {
   const background = opts?.background || false;
   const forceBottom = opts?.forceBottom === true;
@@ -5631,7 +5693,8 @@ async function loadChatHistory(opts) {
     const previous = (targetKey === state.sessionKey)
       ? state.messages
       : (state.tabCache[targetKey]?.messages || []);
-    const changed = !messagesEquivalent(parsed, previous);
+    // `changed` is recomputed below against the merged result so the
+    // re-render decision includes any newly-archived messages.
 
     // Clobber guard: a polled history fetch can land WHILE the user has a send
     // in flight (Android Chrome kills the PWA, wakes back up, fires a history
@@ -5647,20 +5710,34 @@ async function loadChatHistory(opts) {
     const countRole = (arr, role) => Array.isArray(arr)
       ? arr.reduce((n, m) => n + (m?.role === role ? 1 : 0), 0)
       : 0;
-    const isStrictlySmaller = Array.isArray(parsed) && Array.isArray(previous)
-      && parsed.length < previous.length;
-    const losesUserBubble = countRole(parsed, "user") < countRole(previous, "user");
+
+    // Merge polled history with our local persistent cache so older messages
+    // dropped by gateway compaction stay visible (as archived/grayed).
+    const cachedHistory = loadHistoryCache(targetKey);
+    const merged = mergeHistoryWithCache(parsed, cachedHistory);
+
+    // Clobber guard now compares the MERGED result against what's currently
+    // rendered. With the cache merge, normal polls during compaction won't
+    // trip this — only a real loss of user bubbles (cache pruned + gateway
+    // racing the same message) will defer.
+    const isStrictlySmaller = Array.isArray(merged) && Array.isArray(previous)
+      && merged.length < previous.length;
+    const losesUserBubble = countRole(merged, "user") < countRole(previous, "user");
     if (sendInFlight && (isStrictlySmaller || losesUserBubble)) {
       if (!background) hideLoading();
       return;
     }
 
+    saveHistoryCache(targetKey, merged);
+
+    const changed = !messagesEquivalent(merged, previous);
+
     // Cache the result
-    state.tabCache[targetKey] = { messages: parsed, timestamp: Date.now() };
+    state.tabCache[targetKey] = { messages: merged, timestamp: Date.now() };
 
     // Only update UI if this is still the active tab
     if (targetKey === state.sessionKey) {
-      state.messages = parsed;
+      state.messages = merged;
       if (!background) hideLoading();
       if (!background || changed) {
         renderMessages({ preserveScroll: background, forceBottom });
@@ -6579,6 +6656,7 @@ function appendMessage(msg, opts = {}) {
   const bubble = document.createElement("div");
   bubble.className = `openclaw-msg ${cls}`;
   if (msg.isWorkSummary) bubble.classList.add("openclaw-msg-work-summary");
+  if (msg._isArchived) bubble.classList.add("openclaw-msg-archived");
 
   let atPathStripMatches = null;
   if (msg.role === "user" && (!msg.images || msg.images.length === 0)) {
@@ -9722,31 +9800,42 @@ function updateServerPanel() {
   el.innerHTML = html;
 }
 
-// Per-tab-strip bucket: matches the legacy "conv" definition for "human"
-// (suffix has no extra colon, not cron/subagent) so channel sub-sessions like
-// `telegram:direct:...` are bucketed as "system" rather than human tabs.
-function classifyTabBucket(session, prefix) {
-  const key = String(session?.key || "");
-  if (!key.startsWith(prefix)) return "system";
+// Single source of truth for "what bucket is this session in?". Used by both
+// the tab strip (filters which sessions become tabs) and the Tab Settings
+// panel (computes per-bucket counts). Having two divergent classifiers used
+// to mean the panel could say "4 Human chats" while only 3 actually showed
+// in the tab bar — exactly the kind of mismatch we want to avoid.
+function classifySessionBucket(session, prefixOpt) {
+  const rawKey = String(session?.key || "");
+  if (!rawKey) return "system";
+  const key = rawKey.toLowerCase();
+  const prefix = (prefixOpt || agentPrefix() || "").toLowerCase();
+  if (prefix && !key.startsWith(prefix)) return "system";
   if (key.includes(":cron:")) return "cron";
   if (key.includes(":subagent:")) return "subagent";
-  const suffix = key.slice(prefix.length);
-  if (suffix && !suffix.includes(":")) return "human";
-  return "system";
-}
-
-function classifySessionSource(session) {
-  const key = String(session?.key || "").toLowerCase();
+  // Direct chat sessions: tab-N, main, TUI sessions
+  if (/:tab-\d+\b/.test(key) || /:main$/.test(key) || /:tui-/.test(key)) return "human";
+  // Real-human channel sessions (webchat, IM bridges, etc.) — still
+  // human-driven conversation surfaces even though the suffix has colons.
+  if (/(^|:)(webchat|telegram|discord|whatsapp|signal|imessage)(:|$)/.test(key)) return "human";
+  // Bare suffix with no inner colon = standalone direct session.
+  if (prefix) {
+    const suffix = key.slice(prefix.length);
+    if (suffix && !suffix.includes(":")) return "human";
+  }
   const label = String(session?.label || "").toLowerCase();
   const displayName = String(session?.displayName || "").toLowerCase();
   const searchable = `${key} ${label} ${displayName}`;
-  if (!key) return "system";
-  if (key.includes(":cron:")) return "cron";
-  if (key.includes(":subagent:")) return "subagent";
-  if (/:tab-\d+\b/.test(key) || /:main$/.test(key) || /:tui-/.test(key)) return "human";
-  if (/(^|:)(webchat|telegram|discord|whatsapp|signal|imessage)(:|$)/.test(key)) return "human";
   if (/(compaction|compact|maintenance|startup|retry|hook:|node:|heartbeat|tab-namer)/.test(searchable)) return "system";
   return "system";
+}
+
+function classifyTabBucket(session, prefix) {
+  return classifySessionBucket(session, prefix);
+}
+
+function classifySessionSource(session) {
+  return classifySessionBucket(session);
 }
 
 // ─── Tab Settings Panel ─────────────────────────────────────────────
@@ -9765,6 +9854,17 @@ function toggleTabSource(stateKey, storageKey) {
   renderTabs();
 }
 window.toggleTabSource = toggleTabSource;
+
+function setAllTabSources(enabled) {
+  const target = !!enabled;
+  for (const row of TAB_SOURCE_ROWS) {
+    state[row.stateKey] = target;
+    localStorage.setItem(row.storageKey, target ? "1" : "0");
+  }
+  updateTabSettingsPanel();
+  renderTabs();
+}
+window.setAllTabSources = setAllTabSources;
 
 function setHomePairFromPanel(value) {
   setHomeMirrorPreference(value);
@@ -9789,10 +9889,14 @@ function updateTabSettingsPanel() {
   let html = "";
 
   html += '<div class="hud-server-group-title">Show in tab bar</div>';
+  const allOn = TAB_SOURCE_ROWS.every((row) => !!state[row.stateKey]);
   html +=
     '<div class="hud-settings-row">' +
-      '<span class="hud-settings-label">Total sessions</span>' +
-      `<span class="hud-settings-value">${total}</span>` +
+      `<span class="hud-settings-label">Total sessions <span style="opacity:0.5">· ${total}</span></span>` +
+      '<label class="hud-toggle" title="Show every session as a tab">' +
+        `<input type="checkbox" ${allOn ? "checked" : ""} onchange="setAllTabSources(this.checked)">` +
+        '<span class="hud-toggle-track"></span>' +
+      '</label>' +
     '</div>';
 
   for (const row of TAB_SOURCE_ROWS) {
