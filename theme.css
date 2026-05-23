@@ -5279,6 +5279,37 @@ body.theme-wallpaper #dashboard {
   max-width: 100%;
 }
 
+/* Pre-compaction memory-flush marker: a small unobtrusive system row that
+   surfaces gateway-injected memory housekeeping so the chat doesn't appear
+   frozen while the agent is doing background work. Full prompt text stays
+   hidden — only the "what's happening" label shows. */
+.openclaw-memory-flush-marker {
+  display: flex;
+  justify-content: center;
+  margin: 8px 0;
+  opacity: 0.6;
+}
+.openclaw-memory-flush-marker:hover {
+  opacity: 0.9;
+}
+.openclaw-memory-flush-inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--text-muted) 8%, transparent);
+  border-radius: var(--oc-radius-pill);
+  font-style: italic;
+}
+.openclaw-memory-flush-icon {
+  font-style: normal;
+}
+.openclaw-memory-flush-time {
+  opacity: 0.7;
+}
+
 /* Archived messages: pre-compaction transcript reconstructed from the
    local history cache. Renders at reduced opacity so users can still scroll
    back through them without confusing them with the live conversation. */

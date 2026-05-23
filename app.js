@@ -6473,9 +6473,14 @@ function renderMessages(opts = {}) {
       continue;
     }
 
-    // TUI parity: hide gateway-injected control plumbing (pre-compaction memory
-    // flush prompts + NO_REPLY-style sentinels from the assistant).
-    if (isGatewayMemoryFlushUserMessage(msg)) continue;
+    // Gateway-injected memory-flush prompts: render as a compact status
+    // marker so users can see "the agent is doing background memory work"
+    // instead of perceiving a freeze. The full prompt text stays hidden.
+    if (isGatewayMemoryFlushUserMessage(msg)) {
+      appendMemoryFlushMarker(msg);
+      continue;
+    }
+    // NO_REPLY-style assistant sentinels stay fully hidden (paired response).
     if (isSuppressedControlAssistantMessage(msg)) continue;
 
     if (msg.role === "assistant" && isReasoningAssistantMessage(msg) && effectiveReasoningLevel() === "off") {
@@ -6614,6 +6619,30 @@ function renderMessages(opts = {}) {
     state.autoScrollPinned = false;
     updateScrollBottomButton();
   }
+}
+
+function appendMemoryFlushMarker(msg) {
+  const wrap = document.createElement("div");
+  wrap.className = "openclaw-memory-flush-marker";
+  const inner = document.createElement("div");
+  inner.className = "openclaw-memory-flush-inner";
+  const icon = document.createElement("span");
+  icon.className = "openclaw-memory-flush-icon";
+  icon.textContent = "🧹";
+  const label = document.createElement("span");
+  label.className = "openclaw-memory-flush-label";
+  label.textContent = "Pre-compaction memory flush";
+  inner.appendChild(icon);
+  inner.appendChild(label);
+  const ts = Number(msg?.timestamp || 0);
+  if (ts) {
+    const time = document.createElement("span");
+    time.className = "openclaw-memory-flush-time";
+    time.textContent = " · " + cronTimeAgo(ts);
+    inner.appendChild(time);
+  }
+  wrap.appendChild(inner);
+  ui.messagesContainer.appendChild(wrap);
 }
 
 function appendCompactionMarker(msg) {
