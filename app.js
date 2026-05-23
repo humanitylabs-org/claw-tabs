@@ -7755,10 +7755,11 @@ async function runWatchdogRecovery(sessionKey, ss) {
   }
 }
 
-function timeoutNoticeText(waitedMs = 0) {
-  const ms = Math.max(Number(waitedMs || 0), resolvedLlmIdleTimeoutMs());
-  const sec = Math.max(1, Math.round(ms / 1000));
-  return `⚠️ No response from model after ${sec}s. This is usually an upstream timeout, not a UI crash. Send again to retry.`;
+function timeoutNoticeText(_waitedMs = 0) {
+  // Match the OpenClaw TUI's STREAMING_WATCHDOG_USER_MESSAGE verbatim so the
+  // user sees the same friendly "you can just continue" prompt in either UI
+  // (dist/tui-C8IEu4CL.js:2662).
+  return "This response is taking longer than expected. Send another message to continue.";
 }
 
 function appendAssistantNotice(sessionKey, text) {
@@ -7801,7 +7802,7 @@ function notifyRunTimeout(sessionKey, waitedMs = 0) {
   appendAssistantNotice(sessionKey, text);
 
   if (sessionKey === state.sessionKey) {
-    showBanner("Run timed out — send again to retry.");
+    showBanner("This response is taking longer than expected. Send another message to continue.");
     setTimeout(() => {
       if (!state.streams.has(sessionKey)) hideBanner();
     }, 5000);
