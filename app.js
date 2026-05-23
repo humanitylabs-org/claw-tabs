@@ -6403,7 +6403,7 @@ function updateMemoryFlushIndicator() {
     pill.classList.remove("oc-hidden");
     pill.innerHTML =
       '<span class="oc-memory-flush-spinner" aria-hidden="true">✶</span>' +
-      '<span>Memory flush in progress</span>';
+      '<span>Organizing my notes…</span>';
     document.body.classList.add("oc-memory-flush-active");
   } else {
     pill.classList.add("oc-hidden");
@@ -6661,10 +6661,10 @@ function appendMemoryFlushMarker(msg) {
   inner.className = "openclaw-memory-flush-inner";
   const icon = document.createElement("span");
   icon.className = "openclaw-memory-flush-icon";
-  icon.textContent = "🧹";
+  icon.textContent = "📝";
   const label = document.createElement("span");
   label.className = "openclaw-memory-flush-label";
-  label.textContent = "Pre-compaction memory flush";
+  label.textContent = "Organizing my notes";
   inner.appendChild(icon);
   inner.appendChild(label);
   const ts = Number(msg?.timestamp || 0);
@@ -9193,7 +9193,7 @@ function handleSendOrQueue() {
   // flush turn. The flush prompt expects a clean NO_REPLY response; a
   // user message landing mid-flush would derail it.
   if (isMemoryFlushInProgress()) {
-    showBanner("Memory flush in progress — please wait a moment");
+    showBanner("Organizing my notes — give me a moment");
     setTimeout(() => { if (!isMemoryFlushInProgress()) hideBanner(); }, 1500);
     return;
   }
