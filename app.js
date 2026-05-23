@@ -9743,7 +9743,7 @@ function classifySessionSource(session) {
   if (!key) return "system";
   if (key.includes(":cron:")) return "cron";
   if (key.includes(":subagent:")) return "subagent";
-  if (/:tab-\d+\b/.test(key) || /:main$/.test(key)) return "human";
+  if (/:tab-\d+\b/.test(key) || /:main$/.test(key) || /:tui-/.test(key)) return "human";
   if (/(^|:)(webchat|telegram|discord|whatsapp|signal|imessage)(:|$)/.test(key)) return "human";
   if (/(compaction|compact|maintenance|startup|retry|hook:|node:|heartbeat|tab-namer)/.test(searchable)) return "system";
   return "system";
