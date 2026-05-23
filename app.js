@@ -4067,13 +4067,14 @@ function updateBarControls() {
   updateReleaseBadge();
 }
 
-// ── Context-usage notice ────────────────────────────────────────────
-// Mirror of OpenClaw control UI's context-notice (dist/control-ui/.../index-*.js):
-// at >=85% the chip turns red, at >=90% we surface a "Compact" button that
-// calls sessions.compact. Formula matches OpenClaw exactly so the numbers
-// line up between the two UIs.
-const CONTEXT_NOTICE_WARN_RATIO = 0.85;
-const CONTEXT_NOTICE_COMPACT_RATIO = 0.9;
+// ── Long-session notice ─────────────────────────────────────────────
+// Originally mirrored OpenClaw control UI's "X% context used" banner, but
+// totalTokens is the cumulative run cost and not a reliable proxy for "is
+// this session going to break." Switched the trigger to user-turn count —
+// reliability problems (model drift, confused tool loops) correlate way
+// better with turn count than with cumulative tokens, and it behaves the
+// same for Claude CLI and Codex sessions.
+const LONG_SESSION_TURN_THRESHOLD = 40;
 
 function formatContextTokens(n) {
   if (!Number.isFinite(n) || n < 0) return "0";
@@ -4085,20 +4086,17 @@ function formatContextTokens(n) {
 function computeContextNotice() {
   const tabKey = state.sessionKey || "main";
   const tab = state.tabSessions.find((t) => t.key === tabKey);
-  if (!tab) return null;
+  if (!tab || tabKey === "main") return null;
+  const turns = getTabTurnCount(tabKey);
+  if (turns === null || turns < LONG_SESSION_TURN_THRESHOLD) return null;
   const used = Number(tab.used) || 0;
-  const max = Number(tab.max) || 0;
-  if (max <= 0 || used <= 0) return null;
-  const ratio = used / max;
-  // totalTokens is the cumulative cost of this run, not the size of the
-  // current context buffer. Banner just shows the token count + Compact
-  // action — the multiplier is in the hover tooltip if you want detail.
   return {
-    used,
-    max,
-    ratio,
-    label: `${formatContextTokens(used)} tokens`,
-    compactRecommended: ratio >= CONTEXT_NOTICE_COMPACT_RATIO,
+    turns,
+    tabKey,
+    tab,
+    label: used > 0
+      ? `${turns} turns · ${formatContextTokens(used)} tokens`
+      : `${turns} turns`,
   };
 }
 
@@ -4106,16 +4104,13 @@ function updateContextNotice() {
   const el = document.getElementById("oc-context-notice");
   if (!el) return;
   const data = computeContextNotice();
-  if (!data || !data.compactRecommended) {
+  if (!data) {
     el.classList.add("oc-hidden");
     el.innerHTML = "";
     return;
   }
-  const tabKey = state.sessionKey || "main";
-  const busy = !!state.compactionInFlightBySession[tabKey] || !!state._compactBusyByTab?.[tabKey];
+  const busy = !!state.compactionInFlightBySession[data.tabKey] || !!state._compactBusyByTab?.[data.tabKey];
   el.classList.remove("oc-hidden");
-  // No red escalation: this is an awareness/cost prompt, not a hard error.
-  // The amber default is enough signal to be noticed without alarming.
   const safeLabel = escapeHtmlChat(data.label);
   el.innerHTML =
     '<svg class="oc-context-notice__icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
@@ -4126,8 +4121,18 @@ function updateContextNotice() {
     `<button type="button" class="oc-context-notice__action${busy ? " oc-context-notice__action--busy" : ""}" ` +
       `${busy ? "disabled" : ""} onclick="compactCurrentSession()">` +
       `${busy ? "Compacting…" : "Compact"}` +
-    '</button>';
+    '</button>' +
+    `<button type="button" class="oc-context-notice__action oc-context-notice__action--secondary" ` +
+      `onclick="resetCurrentSessionFromNotice()">New session</button>`;
 }
+
+async function resetCurrentSessionFromNotice() {
+  const tabKey = state.sessionKey || "main";
+  const tab = state.tabSessions.find((t) => t.key === tabKey);
+  if (!tab) return;
+  await resetTab(tab);
+}
+window.resetCurrentSessionFromNotice = resetCurrentSessionFromNotice;
 
 async function compactCurrentSession() {
   if (!state.gateway?.connected) return;
@@ -10839,13 +10844,15 @@ const RECOMMENDED_RELIABILITY_DEFAULTS = {
     softTrim: { maxChars: 2500, headChars: 900, tailChars: 900 },
     hardClear: { enabled: true, placeholder: "[Old tool result content cleared]" },
   },
+  // Compaction: stick to OpenClaw's own defaults. The aggressive knobs
+  // (maxActiveTranscriptBytes "4mb", reserveTokensFloor 40k, midTurnPrecheck,
+  // explicit keepRecentTokens) were tuned for an earlier OpenClaw version
+  // and don't actually fire reliably anymore — Claude CLI and Codex manage
+  // their own context internally. Keep just the safeguard mode + user
+  // notifications. The manual Compact button in the banner is the user's
+  // explicit lever when they want to force one.
   compaction: {
-    midTurnPrecheck: { enabled: true },
-    truncateAfterCompaction: true,
-    maxActiveTranscriptBytes: "4mb",
-    reserveTokensFloor: 40000,
-    keepRecentTokens: 20000,
-    timeoutSeconds: 900,
+    mode: "safeguard",
     notifyUser: true,
   },
   // Claude CLI watchdog override — extends "no output for N seconds" timeout
@@ -11038,10 +11045,13 @@ function updateReliabilityPanel() {
 
   const contextInjectionOn = String(d.contextInjection || "always") === rec.contextInjection;
   const contextPruningOn = String(d.contextPruningMode || "off") === rec.contextPruning.mode;
-  const midTurnOn = d.compactionMidTurnPrecheck === true;
-  const truncateOn = d.compactionTruncateAfterCompaction === true;
-  const maxTranscriptOn = String(d.compactionMaxActiveTranscriptBytes || "") === rec.compaction.maxActiveTranscriptBytes;
-  const reserveFloorOn = Number(d.compactionReserveTokensFloor || 0) === Number(rec.compaction.reserveTokensFloor || 0);
+  // Deprecated compaction-config checks: recommended state is "absent / off"
+  // so we now treat all-cleared as the OK condition.
+  const compactionMinimal =
+    d.compactionMidTurnPrecheck !== true
+    && d.compactionTruncateAfterCompaction !== true
+    && !String(d.compactionMaxActiveTranscriptBytes || "")
+    && Number(d.compactionReserveTokensFloor || 0) === 0;
   const cliWatchdogOn = Number(d.cliResumeWatchdogMaxMs || 0) === Number(rec.cliWatchdog.resume.maxMs)
     && Number(d.cliFreshWatchdogMaxMs || 0) === Number(rec.cliWatchdog.fresh.maxMs);
   const harnessPinsOk = !(Array.isArray(d.claudeCliHarnessPins) && d.claudeCliHarnessPins.length > 0);
@@ -11092,8 +11102,8 @@ function updateReliabilityPanel() {
     && (rec.schedule.resetMode === "idle"
       ? resetIdleMinutes === rec.schedule.resetIdleMinutes
       : resetAtHour === rec.schedule.resetAtHour);
-  const allRecommended = contextInjectionOn && contextPruningOn && midTurnOn && truncateOn
-    && maxTranscriptOn && reserveFloorOn && cliWatchdogOn && harnessPinsOk && timeoutsOk && scheduleOk;
+  const allRecommended = contextInjectionOn && contextPruningOn && compactionMinimal
+    && cliWatchdogOn && harnessPinsOk && timeoutsOk && scheduleOk;
 
   const hasPendingEdit = agentTimeoutPending || idleTimeoutPending
     || resetModePending || resetHourPending || resetIdlePending || heartbeatPending;
@@ -11154,10 +11164,10 @@ function updateReliabilityPanel() {
         ['5m','10m','15m','30m','1h'].map(v => '<option value="' + v + '"' + ((String(d.contextPruningTtl || rec.contextPruning.ttl) === v) ? ' selected' : '') + '>' + v + '</option>').join('') +
       '</select>' +
     '</div>' +
-    renderReliabilityToggle('rel-midturn-precheck', 'Mid-turn overflow precheck', midTurnOn, 'Recommended ON') +
-    renderReliabilityToggle('rel-truncate', 'Transcript shrink after compaction', truncateOn, 'Recommended ON') +
-    renderReliabilityToggle('rel-max-transcript', 'Compaction auto-threshold', maxTranscriptOn, `Recommended ON: ${rec.compaction.maxActiveTranscriptBytes}`) +
-    renderReliabilityToggle('rel-reserve-floor', 'Reserve tokens floor', reserveFloorOn, `Recommended ON: ${Number(rec.compaction.reserveTokensFloor || 0).toLocaleString()} tokens`) +
+    // Deprecated compaction toggles removed: midTurnPrecheck / truncateAfterCompaction
+    // / maxActiveTranscriptBytes / reserveTokensFloor were tuning a layer
+    // that doesn't reliably fire anymore for Claude CLI or Codex sessions.
+    // The "apply recommended" button now actively clears them from openclaw.json.
     renderReliabilityToggle('rel-cli-watchdog', 'Extended CLI watchdog (Opus xhigh)', cliWatchdogOn, `Recommended ON: resume ${rec.cliWatchdog.resume.maxMs/1000}s / fresh ${rec.cliWatchdog.fresh.maxMs/1000}s no-output tolerance`);
 
   html += '<div class="hud-settings-divider" style="margin:6px 0"></div>' +
@@ -11292,24 +11302,22 @@ async function applyReliabilitySettingsFromPanel() {
     const contextInjectionOn = !!document.getElementById('rel-context-injection')?.checked;
     const contextPruningOn = !!document.getElementById('rel-context-pruning')?.checked;
     const pruningTtl = String(document.getElementById('rel-pruning-ttl')?.value || RECOMMENDED_RELIABILITY_DEFAULTS.contextPruning.ttl);
-    const midTurnOn = !!document.getElementById('rel-midturn-precheck')?.checked;
-    const truncateOn = !!document.getElementById('rel-truncate')?.checked;
-    const maxTranscriptOn = !!document.getElementById('rel-max-transcript')?.checked;
-    const reserveFloorOn = !!document.getElementById('rel-reserve-floor')?.checked;
     const cliWatchdogOn = !!document.getElementById('rel-cli-watchdog')?.checked;
 
     const contextPruningPatch = contextPruningOn
       ? { ...RECOMMENDED_RELIABILITY_DEFAULTS.contextPruning, ttl: pruningTtl }
       : { mode: "off" };
 
+    // Compaction patch matches the trimmed recommended block and actively
+    // nulls the deprecated knobs so the panel-save path also clears them.
     const compactionPatch = {
-      midTurnPrecheck: { enabled: midTurnOn },
-      truncateAfterCompaction: truncateOn,
-      maxActiveTranscriptBytes: maxTranscriptOn ? RECOMMENDED_RELIABILITY_DEFAULTS.compaction.maxActiveTranscriptBytes : null,
-      reserveTokensFloor: reserveFloorOn ? Number(RECOMMENDED_RELIABILITY_DEFAULTS.compaction.reserveTokensFloor || 0) : null,
-      keepRecentTokens: RECOMMENDED_RELIABILITY_DEFAULTS.compaction.keepRecentTokens,
-      timeoutSeconds: RECOMMENDED_RELIABILITY_DEFAULTS.compaction.timeoutSeconds,
-      notifyUser: true,
+      ...RECOMMENDED_RELIABILITY_DEFAULTS.compaction,
+      midTurnPrecheck: null,
+      truncateAfterCompaction: null,
+      maxActiveTranscriptBytes: null,
+      reserveTokensFloor: null,
+      keepRecentTokens: null,
+      timeoutSeconds: null,
     };
 
     // Note: schema validator requires `command` even though the runtime merges
@@ -11353,10 +11361,10 @@ async function applyReliabilitySettingsFromPanel() {
     state.defaults.contextInjection = contextInjectionOn ? RECOMMENDED_RELIABILITY_DEFAULTS.contextInjection : "always";
     state.defaults.contextPruningMode = contextPruningOn ? "cache-ttl" : "off";
     state.defaults.contextPruningTtl = contextPruningOn ? pruningTtl : "";
-    state.defaults.compactionMidTurnPrecheck = midTurnOn;
-    state.defaults.compactionTruncateAfterCompaction = truncateOn;
-    state.defaults.compactionMaxActiveTranscriptBytes = maxTranscriptOn ? RECOMMENDED_RELIABILITY_DEFAULTS.compaction.maxActiveTranscriptBytes : "";
-    state.defaults.compactionReserveTokensFloor = reserveFloorOn ? Number(RECOMMENDED_RELIABILITY_DEFAULTS.compaction.reserveTokensFloor || 0) : 0;
+    state.defaults.compactionMidTurnPrecheck = false;
+    state.defaults.compactionTruncateAfterCompaction = false;
+    state.defaults.compactionMaxActiveTranscriptBytes = "";
+    state.defaults.compactionReserveTokensFloor = 0;
     state.defaults.cliResumeWatchdogMaxMs = cliWatchdogOn ? Number(RECOMMENDED_RELIABILITY_DEFAULTS.cliWatchdog.resume.maxMs || 0) : 0;
     state.defaults.cliFreshWatchdogMaxMs = cliWatchdogOn ? Number(RECOMMENDED_RELIABILITY_DEFAULTS.cliWatchdog.fresh.maxMs || 0) : 0;
 
@@ -11399,12 +11407,26 @@ async function applyRecommendedReliabilityDefaults() {
       ? Object.fromEntries(badPins.map((ref) => [ref, { agentRuntime: null }]))
       : undefined;
 
+    // Explicitly null the deprecated compaction knobs so they're removed
+    // from openclaw.json on apply — we used to recommend aggressive values
+    // here, but they no longer help (Claude CLI / Codex manage their own
+    // context internally now).
+    const compactionPatch = {
+      ...rec.compaction,
+      midTurnPrecheck: null,
+      truncateAfterCompaction: null,
+      maxActiveTranscriptBytes: null,
+      reserveTokensFloor: null,
+      keepRecentTokens: null,
+      timeoutSeconds: null,
+    };
+
     const rawPatch = {
       agents: {
         defaults: {
           contextInjection: rec.contextInjection,
           contextPruning: rec.contextPruning,
-          compaction: rec.compaction,
+          compaction: compactionPatch,
           cliBackends: {
             "claude-cli": {
               command: "claude",
@@ -11437,10 +11459,12 @@ async function applyRecommendedReliabilityDefaults() {
     state.defaults.contextInjection = rec.contextInjection;
     state.defaults.contextPruningMode = rec.contextPruning.mode;
     state.defaults.contextPruningTtl = rec.contextPruning.ttl;
-    state.defaults.compactionMidTurnPrecheck = true;
-    state.defaults.compactionTruncateAfterCompaction = true;
-    state.defaults.compactionMaxActiveTranscriptBytes = rec.compaction.maxActiveTranscriptBytes;
-    state.defaults.compactionReserveTokensFloor = Number(rec.compaction.reserveTokensFloor || 0);
+    // Deprecated knobs — null these locally too so the panel doesn't keep
+    // showing them as configured.
+    state.defaults.compactionMidTurnPrecheck = false;
+    state.defaults.compactionTruncateAfterCompaction = false;
+    state.defaults.compactionMaxActiveTranscriptBytes = "";
+    state.defaults.compactionReserveTokensFloor = 0;
     state.defaults.cliResumeWatchdogMaxMs = Number(rec.cliWatchdog.resume.maxMs || 0);
     state.defaults.cliFreshWatchdogMaxMs = Number(rec.cliWatchdog.fresh.maxMs || 0);
     state.defaults.agentTimeoutSeconds = rec.agentTimeoutSeconds;

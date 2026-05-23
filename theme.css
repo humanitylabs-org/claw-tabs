@@ -5416,6 +5416,11 @@ body.theme-wallpaper #dashboard {
   opacity: 0.6;
   cursor: progress;
 }
+.oc-context-notice__action--secondary {
+  margin-left: 4px;
+  opacity: 0.85;
+  font-weight: 500;
+}
 
 /* Typing/status legibility */
 .openclaw-typing {
