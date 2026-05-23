@@ -2652,8 +2652,7 @@ function renderHamburgerDropdown() {
     fill.className = "oc-dd-meter-fill";
     fill.style.width = tab.pct + "%";
     const ddRatio = (Number(tab.max) > 0 ? (Number(tab.used) || 0) / Number(tab.max) : 0);
-    if (ddRatio >= 0.9) fill.classList.add("oc-dd-meter-fill--danger");
-    else if (ddRatio >= 0.85) fill.classList.add("oc-dd-meter-fill--warning");
+    if (ddRatio >= 0.85) fill.classList.add("oc-dd-meter-fill--warning");
     const meterTitle = contextMeterTitle(tab.model, tab.used, tab.max, tab.pctRaw ?? tab.pct ?? 0, tab.key, tab);
     fill.title = meterTitle;
     meter.title = meterTitle;
@@ -3029,11 +3028,11 @@ async function _renderTabsInner() {
       const fill = document.createElement("div");
       fill.className = "openclaw-tab-meter-fill";
       fill.style.width = tab.pct + "%";
-      // Style: yellow at >=85% (warning), red at >=90% (danger) — same
-      // thresholds the OpenClaw control-ui context notice uses.
+      // Tint to amber at >=85% so high-usage tabs stand out, but skip the
+      // pure-red danger state — totalTokens is the cumulative run cost, not
+      // a hard ceiling, so red would be overly alarmist.
       const meterRatio = (Number(tab.max) > 0 ? (Number(tab.used) || 0) / Number(tab.max) : 0);
-      if (meterRatio >= 0.9) fill.classList.add("openclaw-tab-meter-fill--danger");
-      else if (meterRatio >= 0.85) fill.classList.add("openclaw-tab-meter-fill--warning");
+      if (meterRatio >= 0.85) fill.classList.add("openclaw-tab-meter-fill--warning");
       fill.title = meterTitle;
       meter.title = meterTitle;
       meter.appendChild(fill);
@@ -4102,13 +4101,22 @@ function computeContextNotice() {
   const max = Number(tab.max) || 0;
   if (max <= 0 || used <= 0) return null;
   const ratio = used / max;
-  const pct = Math.min(Math.round(ratio * 100), 100);
+  // totalTokens is the cumulative cost of THIS RUN (sum of input + output +
+  // cache reads/writes across every iteration), not the size of the current
+  // context buffer. So we deliberately avoid OpenClaw control-ui's
+  // misleading "100% context used" wording. Below the window we show "{pct}%
+  // of window", above we show the multiplier ("10.3× window").
+  const sub1Pct = Math.round(ratio * 100);
+  const multiplier = ratio.toFixed(1).replace(/\.0$/, "");
+  const detail = ratio < 1
+    ? `${sub1Pct}% of window · ${formatContextTokens(used)} / ${formatContextTokens(max)}`
+    : `${multiplier}× window · compact to reduce future cost`;
   return {
-    pct,
     used,
     max,
-    detail: `${formatContextTokens(used)} / ${formatContextTokens(max)}`,
-    warning: ratio >= CONTEXT_NOTICE_WARN_RATIO,
+    ratio,
+    label: `${formatContextTokens(used)} tokens used this run`,
+    detail,
     compactRecommended: ratio >= CONTEXT_NOTICE_COMPACT_RATIO,
   };
 }
@@ -4125,21 +4133,19 @@ function updateContextNotice() {
   const tabKey = state.sessionKey || "main";
   const busy = !!state.compactionInFlightBySession[tabKey] || !!state._compactBusyByTab?.[tabKey];
   el.classList.remove("oc-hidden");
-  el.classList.toggle("oc-context-notice--warning", !!data.warning);
+  // No red escalation: this is an awareness/cost prompt, not a hard error.
+  // The amber default is enough signal to be noticed without alarming.
+  const safeLabel = escapeHtmlChat(data.label);
   const safeDetail = escapeHtmlChat(data.detail);
   el.innerHTML =
-    '<svg class="oc-context-notice__icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
-      '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" />' +
-      '<line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />' +
+    '<svg class="oc-context-notice__icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+      '<polyline points="4 14 10 14 10 20" /><polyline points="20 10 14 10 14 4" />' +
+      '<line x1="14" y1="10" x2="21" y2="3" /><line x1="3" y1="21" x2="10" y2="14" />' +
     '</svg>' +
-    `<span class="oc-context-notice__label">${data.pct}% context used</span>` +
+    `<span class="oc-context-notice__label">${safeLabel}</span>` +
     `<span class="oc-context-notice__detail">${safeDetail}</span>` +
     `<button type="button" class="oc-context-notice__action${busy ? " oc-context-notice__action--busy" : ""}" ` +
       `${busy ? "disabled" : ""} onclick="compactCurrentSession()">` +
-      '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">' +
-        '<polyline points="4 14 10 14 10 20" /><polyline points="20 10 14 10 14 4" />' +
-        '<line x1="14" y1="10" x2="21" y2="3" /><line x1="3" y1="21" x2="10" y2="14" />' +
-      '</svg>' +
       `${busy ? "Compacting…" : "Compact"}` +
     '</button>';
 }
