@@ -1749,16 +1749,6 @@ async function startChat() {
 
       if (ss.background) continue;
 
-      // TUI parity (DEFAULT_STREAMING_WATCHDOG_MS in dist/tui-C8IEu4CL.js:2661):
-      // 30s of stream silence → surface the friendly "send another message to
-      // continue" notice and abandon the run locally so the composer is free.
-      // This matches what TUI users see when a tool call (e.g., AskUserQuestion)
-      // hangs waiting for a tool_result that never arrives.
-      if (silentMs >= TUI_PARITY_SOFT_WATCHDOG_MS) {
-        markStreamStalled(sk, ss, `silent for ${Math.round(silentMs / 1000)}s (TUI parity)`, silentMs);
-        continue;
-      }
-
       if (silentMs >= streamSilenceHardMs()) {
         markStreamStalled(sk, ss, `silent for ${Math.round(silentMs / 1000)}s`, silentMs);
         continue;
@@ -4010,10 +4000,6 @@ const STATUS_FINISHING_UP = "Finishing up";
 const FINISHING_UP_SILENCE_MS = 3_000;
 const STREAM_SILENCE_RECOVERY_MS = 60_000;
 const STREAM_SILENCE_HARD_FLOOR_MS = 180_000;
-// Match OpenClaw TUI's DEFAULT_STREAMING_WATCHDOG_MS so the friendly
-// "send another message to continue" notice fires at the same threshold
-// in both UIs.
-const TUI_PARITY_SOFT_WATCHDOG_MS = 30_000;
 const HISTORY_IN_FLIGHT_FLOOR_MS = 180_000;
 const UI_IDLE_GRACE_MS = 30_000;
 const TRANSCRIPT_IN_FLIGHT_MAX_AGE_MS = 5 * 60 * 1000;
