@@ -3975,7 +3975,6 @@ function updateModelLabel() {
 
 // ─── Bar Controls (thinking effort + steps visibility) ──────────────
 
-const STEPS_CYCLE = ["off", "on", "full"];
 const THINKING_CYCLE = ["off", "low", "medium", "high", "xhigh"];
 const STATUS_WORKING = "Working";
 const STATUS_STILL_WORKING = "Still working";
@@ -4568,9 +4567,11 @@ async function setSessionControl(field, nextValue) {
 }
 
 async function cycleShowSteps() {
+  // Binary toggle: clicking the chip should land on "on" or "off" and never
+  // sneak the user into "full" (tool output is noisy). "full" stays reachable
+  // via /verbose full for the rare case someone wants it.
   const current = effectiveVerboseLevel();
-  const idx = STEPS_CYCLE.indexOf(current);
-  const next = STEPS_CYCLE[(idx + 1) % STEPS_CYCLE.length];
+  const next = current === "on" ? "off" : "on";
   await setSessionControl("verboseLevel", next);
 }
 
