@@ -2651,6 +2651,9 @@ function renderHamburgerDropdown() {
     const fill = document.createElement("div");
     fill.className = "oc-dd-meter-fill";
     fill.style.width = tab.pct + "%";
+    const ddRatio = (Number(tab.max) > 0 ? (Number(tab.used) || 0) / Number(tab.max) : 0);
+    if (ddRatio >= 0.9) fill.classList.add("oc-dd-meter-fill--danger");
+    else if (ddRatio >= 0.85) fill.classList.add("oc-dd-meter-fill--warning");
     const meterTitle = contextMeterTitle(tab.model, tab.used, tab.max, tab.pctRaw ?? tab.pct ?? 0, tab.key, tab);
     fill.title = meterTitle;
     meter.title = meterTitle;
@@ -3026,6 +3029,11 @@ async function _renderTabsInner() {
       const fill = document.createElement("div");
       fill.className = "openclaw-tab-meter-fill";
       fill.style.width = tab.pct + "%";
+      // Style: yellow at >=85% (warning), red at >=90% (danger) — same
+      // thresholds the OpenClaw control-ui context notice uses.
+      const meterRatio = (Number(tab.max) > 0 ? (Number(tab.used) || 0) / Number(tab.max) : 0);
+      if (meterRatio >= 0.9) fill.classList.add("openclaw-tab-meter-fill--danger");
+      else if (meterRatio >= 0.85) fill.classList.add("openclaw-tab-meter-fill--warning");
       fill.title = meterTitle;
       meter.title = meterTitle;
       meter.appendChild(fill);
@@ -3949,10 +3957,18 @@ function getTabTurnCount(sessionKey) {
 // tooltip surfaces, mapped to 0–100 with a soft cap at 100 turns so the bar
 // visualization moves with conversation length. Returns 0 when history hasn't
 // been loaded yet (the meter degrades to an empty line, never a fake percentage).
-function meterFillPercentForSession(sessionKey, _fallbackPct, _max, _sessionRow) {
-  const turns = getTabTurnCount(sessionKey);
-  if (turns === null) return 0;
-  return Math.max(0, Math.min(100, turns));
+function meterFillPercentForSession(_sessionKey, fallbackPct, max, sessionRow) {
+  // Match OpenClaw control UI: ratio = used / max, capped at 100% so the
+  // meter visually maxes out at full instead of overflowing. The raw
+  // (uncapped) value still lives on tab.pctRaw / contextMeterTitle for the
+  // tooltip and the context-usage banner.
+  const used = Number(sessionRow?.totalTokens) || 0;
+  const window = Number(max) || Number(sessionRow?.contextTokens) || 0;
+  if (window <= 0 || used <= 0) {
+    const safe = Number(fallbackPct);
+    return Number.isFinite(safe) ? Math.max(0, Math.min(100, safe)) : 0;
+  }
+  return Math.max(0, Math.min(100, Math.round((used / window) * 100)));
 }
 
 // Matches OpenClaw's gateway-side formatTokenCount (status-message)
@@ -3970,16 +3986,22 @@ function formatTokenCountShort(value) {
   return String(Math.round(safe));
 }
 
-// Meter tooltip shows the session's user-turn count — the simplest honest
-// "how big is this conversation" signal we can compute purely client-side.
-// We deliberately don't show token ratios: cumulative totalTokens / contextTokens
-// can read >100% after compactions, and inputTokens alone under-counts when
-// prompt caching is active. Turns are unambiguous.
-function contextMeterTitle(model, used, max, pct, sessionKey, sessionRow) {
+// Tooltip mirrors the OpenClaw context-notice text: "{capped}% context used
+// {used}/{max} · {turns} turns". Cumulative totalTokens/contextTokens can
+// read >100% after compactions, so we surface the raw ratio in the tooltip
+// while the visible meter caps at 100% (parity with the control UI).
+function contextMeterTitle(model, used, max, pctRaw, sessionKey, sessionRow) {
   const modelName = shortModelName(model || "unknown");
   const turns = getTabTurnCount(sessionKey);
-  if (turns === null) return `${modelName}`;
-  return `${modelName}\n${turns} ${turns === 1 ? "turn" : "turns"}`;
+  const turnsPart = turns === null ? "" : `\n${turns} ${turns === 1 ? "turn" : "turns"}`;
+  const safeUsed = Number(used) || 0;
+  const safeMax = Number(max) || 0;
+  if (safeMax <= 0 || safeUsed <= 0) return `${modelName}${turnsPart}`;
+  const ratio = safeUsed / safeMax;
+  const cappedPct = Math.min(100, Math.round(ratio * 100));
+  const rawPct = Math.round(ratio * 100);
+  const pctLabel = rawPct > cappedPct ? `${cappedPct}% (raw ${rawPct}%)` : `${cappedPct}%`;
+  return `${modelName}\n${pctLabel} context used\n${formatContextTokens(safeUsed)} / ${formatContextTokens(safeMax)}${turnsPart}`;
 }
 
 function updateModelLabel() {
