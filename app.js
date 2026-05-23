@@ -1749,6 +1749,16 @@ async function startChat() {
 
       if (ss.background) continue;
 
+      // TUI parity (DEFAULT_STREAMING_WATCHDOG_MS in dist/tui-C8IEu4CL.js:2661):
+      // 30s of stream silence → surface the friendly "send another message to
+      // continue" notice and abandon the run locally so the composer is free.
+      // This matches what TUI users see when a tool call (e.g., AskUserQuestion)
+      // hangs waiting for a tool_result that never arrives.
+      if (silentMs >= TUI_PARITY_SOFT_WATCHDOG_MS) {
+        markStreamStalled(sk, ss, `silent for ${Math.round(silentMs / 1000)}s (TUI parity)`, silentMs);
+        continue;
+      }
+
       if (silentMs >= streamSilenceHardMs()) {
         markStreamStalled(sk, ss, `silent for ${Math.round(silentMs / 1000)}s`, silentMs);
         continue;
@@ -3586,11 +3596,16 @@ async function createNewTab() {
   const nextNum = nums.length > 0 ? Math.max(...nums) + 1 : 1;
   const sessionKey = `tab-${nextNum}`;
   resetTabRenameState(sessionKey, true);
+  // Skip the smart-AI auto-rename for fresh tabs: the user prefers the
+  // session key itself ("tab-91") as the default label so it's predictable
+  // and matches what `openclaw sessions` shows. They can still rename
+  // manually later. Mark the rename slot as `manual` so autoRenameTab and
+  // upgradeTabTitle bail out at their early-return guards.
   const renameMeta = ensureTabRenameMeta(sessionKey);
-  renameMeta.autoEligible = true;
-  renameMeta.manual = false;
+  renameMeta.autoEligible = false;
+  renameMeta.manual = true;
   renameMeta.pending = false;
-  renameMeta.attempted = false;
+  renameMeta.attempted = true;
   renameMeta.inFlight = false;
 
   try {
@@ -3601,6 +3616,10 @@ async function createNewTab() {
       idempotencyKey: "newtab-" + Date.now(),
     });
     await new Promise(r => setTimeout(r, 500));
+
+    // Patch the gateway-side label to the session key — best-effort, ignored
+    // if the gateway rejects it. Re-tries are handled inside the helper.
+    void patchSessionLabelWithRetry(sessionKey, sessionKey).catch(() => {});
 
     state.streamEl = null;
     ui.typingIndicator.classList.add("oc-hidden");
@@ -3991,6 +4010,10 @@ const STATUS_FINISHING_UP = "Finishing up";
 const FINISHING_UP_SILENCE_MS = 3_000;
 const STREAM_SILENCE_RECOVERY_MS = 60_000;
 const STREAM_SILENCE_HARD_FLOOR_MS = 180_000;
+// Match OpenClaw TUI's DEFAULT_STREAMING_WATCHDOG_MS so the friendly
+// "send another message to continue" notice fires at the same threshold
+// in both UIs.
+const TUI_PARITY_SOFT_WATCHDOG_MS = 30_000;
 const HISTORY_IN_FLIGHT_FLOOR_MS = 180_000;
 const UI_IDLE_GRACE_MS = 30_000;
 const TRANSCRIPT_IN_FLIGHT_MAX_AGE_MS = 5 * 60 * 1000;
@@ -8226,11 +8249,10 @@ function handleStreamEvent(payload) {
       renderTypingLabel(shouldShowToolEvents() ? label : STATUS_WORKING, sessionKey);
       ui.typingIndicator.classList.remove("oc-hidden");
     }
-    if (toolName === "AskUserQuestion" && isActiveTab) {
-      // args may be empty at start (Claude streams tool input via deltas) —
-      // try now and re-try on later phases until we get parseable questions.
-      renderAskUserQuestionForm(toolArgs, resolvedToolCallId);
-    }
+    // TUI parity: AskUserQuestion expects a tool_result echo that no
+    // ClawTabs-side form can synthesize. Show it as a plain tool chip and
+    // let the soft watchdog (30s, TUI's DEFAULT_STREAMING_WATCHDOG_MS) fire
+    // the "send another message to continue" message — same fallback as TUI.
   } else if ((stream === "tool" || toolName) && phase === "update") {
     const detail = summarizeToolResult(payloadData?.partialResult);
     const item = getToolEntry(ss, toolCallId);
@@ -8244,10 +8266,6 @@ function handleStreamEvent(payload) {
       });
       ui.typingIndicator.classList.remove("oc-hidden");
       renderTypingLabel(item.label, sessionKey);
-    }
-    if (toolName === "AskUserQuestion" && isActiveTab) {
-      const args = payloadData?.args || payloadData?.input || payloadData?.partialArgs || payload.args;
-      renderAskUserQuestionForm(args, toolCallId);
     }
   } else if ((stream === "tool" || toolName) && phase === "result") {
     const item = getToolEntry(ss, toolCallId);
