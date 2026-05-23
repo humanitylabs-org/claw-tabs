@@ -7388,7 +7388,7 @@ function renderAskUserQuestionForm(args, toolCallId) {
   submitBtn.type = "button";
   submitBtn.className = "openclaw-askq-submit";
   submitBtn.textContent = "Send answer";
-  submitBtn.addEventListener("click", () => {
+  submitBtn.addEventListener("click", async () => {
     if (formState.submitted) return;
     const lines = [];
     for (let qIdx = 0; qIdx < questions.length; qIdx++) {
@@ -7403,6 +7403,13 @@ function renderAskUserQuestionForm(args, toolCallId) {
     submitBtn.disabled = true;
     submitBtn.textContent = "sent";
     card.classList.add("openclaw-askq-submitted");
+    // AskUserQuestion lives inside the Claude CLI side and expects a
+    // tool_result echo we can't synthesize. Abort the pending tool call
+    // first so the answer becomes a fresh user turn — otherwise the CLI
+    // hangs waiting for a tool_result that never arrives.
+    if (state.streams.has(state.sessionKey)) {
+      try { await abortMessage(); } catch {}
+    }
     void sendMessage(lines.join("\n\n"));
   });
   actions.appendChild(submitBtn);
