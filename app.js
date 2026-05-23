@@ -6380,6 +6380,38 @@ function isGatewayMemoryFlushUserMessage(msg) {
   return text.startsWith(GATEWAY_MEMORY_FLUSH_PREFIX);
 }
 
+// True if state.messages has a pre-compaction memory-flush user prompt with
+// no matching NO_REPLY-style assistant response after it. This is the window
+// where the agent is mid-flush and the chat would otherwise look frozen.
+function isMemoryFlushInProgress() {
+  const msgs = state.messages || [];
+  let flushIdx = -1;
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (isGatewayMemoryFlushUserMessage(msgs[i])) { flushIdx = i; break; }
+  }
+  if (flushIdx < 0) return false;
+  for (let i = flushIdx + 1; i < msgs.length; i++) {
+    if (isSuppressedControlAssistantMessage(msgs[i])) return false;
+  }
+  return true;
+}
+
+function updateMemoryFlushIndicator() {
+  const pill = document.getElementById("oc-memory-flush-pill");
+  if (!pill) return;
+  if (isMemoryFlushInProgress()) {
+    pill.classList.remove("oc-hidden");
+    pill.innerHTML =
+      '<span class="oc-memory-flush-spinner" aria-hidden="true">✶</span>' +
+      '<span>Memory flush in progress</span>';
+    document.body.classList.add("oc-memory-flush-active");
+  } else {
+    pill.classList.add("oc-hidden");
+    pill.innerHTML = "";
+    document.body.classList.remove("oc-memory-flush-active");
+  }
+}
+
 function isReasoningAssistantMessage(msg) {
   if (!msg || msg.role !== "assistant") return false;
   if (msg.isReasoning) return true;
@@ -6611,6 +6643,7 @@ function renderMessages(opts = {}) {
   }
 
   appendInlineTypingBubble();
+  updateMemoryFlushIndicator();
 
   if (forceBottom || wasNearBottom) {
     scrollToBottom(true);
@@ -9156,6 +9189,14 @@ function autoResize() {
 // ─── Input Handlers ──────────────────────────────────────────────────
 
 function handleSendOrQueue() {
+  // Block sends while the gateway is running its pre-compaction memory
+  // flush turn. The flush prompt expects a clean NO_REPLY response; a
+  // user message landing mid-flush would derail it.
+  if (isMemoryFlushInProgress()) {
+    showBanner("Memory flush in progress — please wait a moment");
+    setTimeout(() => { if (!isMemoryFlushInProgress()) hideBanner(); }, 1500);
+    return;
+  }
   const text = ui.messageInput.value.trim();
   const hasDraftContent = !!text || state.pendingAttachments.length > 0;
   const queueIntent = ui.sendBtn.classList.contains("stop-mode") && ui.sendBtn.classList.contains("queue-mode");

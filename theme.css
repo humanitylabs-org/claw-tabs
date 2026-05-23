@@ -5279,6 +5279,41 @@ body.theme-wallpaper #dashboard {
   max-width: 100%;
 }
 
+/* Live status pill while a gateway memory-flush is being processed.
+   Sits above the composer like the typing indicator. The body class
+   `oc-memory-flush-active` is added at the same time so other styles
+   (e.g., dimmed composer) can react. */
+.oc-memory-flush-pill {
+  display: flex;
+  justify-content: center;
+  padding: 6px max(12px, calc(50% - 410px)) 4px;
+}
+.oc-memory-flush-pill > * {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent, #3b82f6);
+  background: color-mix(in srgb, var(--accent, #3b82f6) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent, #3b82f6) 35%, transparent);
+  border-radius: var(--oc-radius-pill);
+}
+.oc-memory-flush-pill .oc-memory-flush-spinner {
+  display: inline-block;
+  font-size: 14px;
+  animation: oc-memory-flush-spin 1.6s linear infinite;
+}
+@keyframes oc-memory-flush-spin {
+  to { transform: rotate(360deg); }
+}
+/* Dim the composer while a flush is running so it's obvious the send
+   button is gated. Click is still possible (we show a banner explainer). */
+body.oc-memory-flush-active .openclaw-input-area-inner {
+  opacity: 0.55;
+}
+
 /* Pre-compaction memory-flush marker: a small unobtrusive system row that
    surfaces gateway-injected memory housekeeping so the chat doesn't appear
    frozen while the agent is doing background work. Full prompt text stays
