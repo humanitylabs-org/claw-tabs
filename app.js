@@ -8643,6 +8643,25 @@ function handleChatEvent(payload) {
     }
     finishStream(eventSessionKey);
     if (isActiveTab) {
+      // Web-UI parity: push the streamed assistant text directly to
+      // state.messages so it appears immediately instead of waiting on
+      // loadChatHistory's gateway round-trip. If the transcript doesn't
+      // have it yet (race), loadChatHistory's pendingFinals salvage will
+      // re-add it; otherwise the polled transcript replaces our local push
+      // with the canonical version. Skip silent control replies.
+      const directText = (pendingText || "").trim();
+      const isSilent = !directText || directText === "HEARTBEAT_OK" || directText === "NO_REPLY";
+      if (!isSilent) {
+        state.messages.push({
+          role: "assistant",
+          text: pendingText,
+          images: [],
+          audios: [],
+          timestamp: Date.now(),
+          runId,
+        });
+        renderMessages({ preserveScroll: false });
+      }
       loadChatHistory().then(() => updateContextMeter());
     } else {
       // Non-active tab finished streaming — mark unread (unless heartbeat/silent)
@@ -9238,14 +9257,11 @@ function autoResize() {
 // ─── Input Handlers ──────────────────────────────────────────────────
 
 function handleSendOrQueue() {
-  // Block sends while the gateway is running its pre-compaction memory
-  // flush turn. The flush prompt expects a clean NO_REPLY response; a
-  // user message landing mid-flush would derail it.
-  if (isMemoryFlushInProgress()) {
-    showBanner("Organizing my notes — give me a moment");
-    setTimeout(() => { if (!isMemoryFlushInProgress()) hideBanner(); }, 1500);
-    return;
-  }
+  // No send block for memory-flush state — the detector can stick on
+  // sessions that timed out without emitting NO_REPLY, which blocks
+  // legitimate sends (notably Add to Queue). The visible pill is still
+  // shown for awareness; if a user message lands mid-flush, the agent
+  // adapts on the next turn.
   const text = ui.messageInput.value.trim();
   const hasDraftContent = !!text || state.pendingAttachments.length > 0;
   const queueIntent = ui.sendBtn.classList.contains("stop-mode") && ui.sendBtn.classList.contains("queue-mode");
