@@ -951,8 +951,13 @@ const state = {
   // race: when chatState==="final" arrives but the JSONL transcript hasn't yet
   // included the final assistant turn, loadChatHistory splices this in so the
   // streamed message stays visible until the canonical history catches up.
+  // Persisted to localStorage so a page refresh after final-but-before-flush
+  // doesn't drop the streamed text from view.
   // { [sessionKey]: { runId, text, timestamp } }
-  pendingFinals: {},
+  pendingFinals: (() => {
+    try { return JSON.parse(localStorage.getItem("clawtabs.pendingFinals") || "{}") || {}; }
+    catch { return {}; }
+  })(),
   historyInFlight: {}, // { [sessionKey]: boolean }
   historyInFlightStartedAt: {}, // { [sessionKey]: epochMs }
   historyPollTimer: null,
@@ -3838,6 +3843,31 @@ function defaultContextMax(model) {
   return 200000;
 }
 
+// Streamed final-text snapshots live in state.pendingFinals until either the
+// JSONL transcript catches up (loadChatHistory matches the streamed text) or
+// the snapshot ages past PENDING_FINAL_TTL_MS. The TTL is generous (10 min)
+// because in practice the disk-flush race can stretch out under load or
+// compaction, and getting it wrong means a refresh wipes a recently-streamed
+// assistant message from view. The whole map is mirrored to localStorage so
+// a page refresh during that window doesn't lose unmatched snapshots.
+const PENDING_FINAL_TTL_MS = 10 * 60 * 1000;
+function savePendingFinals() {
+  try {
+    // Prune anything past the TTL on every write to keep the localStorage
+    // entry from growing forever in a long-running session.
+    const now = Date.now();
+    let dirty = false;
+    for (const [k, v] of Object.entries(state.pendingFinals)) {
+      if (!v || now - (v.timestamp || 0) >= PENDING_FINAL_TTL_MS) {
+        delete state.pendingFinals[k];
+        dirty = true;
+      }
+    }
+    localStorage.setItem("clawtabs.pendingFinals", JSON.stringify(state.pendingFinals));
+    return dirty;
+  } catch { return false; }
+}
+
 // Capture the last-call usage from the chat final-event payload, persist for
 // later renders. The session payload only exposes cumulative totalTokens —
 // this gives us per-call input/cacheRead/cacheWrite so the meter can show
@@ -5523,10 +5553,10 @@ async function loadChatHistory(opts) {
     // in until the canonical history catches up.
     const pf = state.pendingFinals[targetKey];
     if (pf?.text) {
-      const PENDING_FINAL_TTL_MS = 60_000;
       const ageMs = Date.now() - (pf.timestamp || 0);
       if (ageMs >= PENDING_FINAL_TTL_MS) {
         delete state.pendingFinals[targetKey];
+        savePendingFinals();
       } else {
         const target = pf.text.trim();
         const probe = target.slice(0, Math.min(80, target.length));
@@ -5542,6 +5572,7 @@ async function loadChatHistory(opts) {
         }
         if (matched) {
           delete state.pendingFinals[targetKey];
+          savePendingFinals();
         } else {
           parsed.push({
             role: "assistant",
@@ -8221,6 +8252,7 @@ function handleChatEvent(payload) {
         text: pendingText,
         timestamp: Date.now(),
       };
+      savePendingFinals();
     }
 
     // Upgrade tab title from assistant's response (better than user's choppy words)
