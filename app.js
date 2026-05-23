@@ -4090,21 +4090,14 @@ function computeContextNotice() {
   const max = Number(tab.max) || 0;
   if (max <= 0 || used <= 0) return null;
   const ratio = used / max;
-  // totalTokens is the cumulative cost of THIS RUN (sum of input + output +
-  // cache reads/writes across every iteration), not the size of the current
-  // context buffer. So we deliberately avoid OpenClaw control-ui's
-  // misleading "100% context used" wording. Below the window we show "{pct}%
-  // of window", above we show the multiplier ("10.3× window").
-  const multiplier = ratio.toFixed(1).replace(/\.0$/, "");
-  const detail = ratio < 1
-    ? `${Math.round(ratio * 100)}% of window`
-    : `${multiplier}× window`;
+  // totalTokens is the cumulative cost of this run, not the size of the
+  // current context buffer. Banner just shows the token count + Compact
+  // action — the multiplier is in the hover tooltip if you want detail.
   return {
     used,
     max,
     ratio,
     label: `${formatContextTokens(used)} tokens`,
-    detail,
     compactRecommended: ratio >= CONTEXT_NOTICE_COMPACT_RATIO,
   };
 }
@@ -4124,14 +4117,12 @@ function updateContextNotice() {
   // No red escalation: this is an awareness/cost prompt, not a hard error.
   // The amber default is enough signal to be noticed without alarming.
   const safeLabel = escapeHtmlChat(data.label);
-  const safeDetail = escapeHtmlChat(data.detail);
   el.innerHTML =
     '<svg class="oc-context-notice__icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
       '<polyline points="4 14 10 14 10 20" /><polyline points="20 10 14 10 14 4" />' +
       '<line x1="14" y1="10" x2="21" y2="3" /><line x1="3" y1="21" x2="10" y2="14" />' +
     '</svg>' +
     `<span class="oc-context-notice__label">${safeLabel}</span>` +
-    `<span class="oc-context-notice__detail">${safeDetail}</span>` +
     `<button type="button" class="oc-context-notice__action${busy ? " oc-context-notice__action--busy" : ""}" ` +
       `${busy ? "disabled" : ""} onclick="compactCurrentSession()">` +
       `${busy ? "Compacting…" : "Compact"}` +
