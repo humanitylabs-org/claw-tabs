@@ -2651,8 +2651,6 @@ function renderHamburgerDropdown() {
     const fill = document.createElement("div");
     fill.className = "oc-dd-meter-fill";
     fill.style.width = tab.pct + "%";
-    const ddRatio = (Number(tab.max) > 0 ? (Number(tab.used) || 0) / Number(tab.max) : 0);
-    if (ddRatio >= 0.85) fill.classList.add("oc-dd-meter-fill--warning");
     const meterTitle = contextMeterTitle(tab.model, tab.used, tab.max, tab.pctRaw ?? tab.pct ?? 0, tab.key, tab);
     fill.title = meterTitle;
     meter.title = meterTitle;
@@ -3028,11 +3026,9 @@ async function _renderTabsInner() {
       const fill = document.createElement("div");
       fill.className = "openclaw-tab-meter-fill";
       fill.style.width = tab.pct + "%";
-      // Tint to amber at >=85% so high-usage tabs stand out, but skip the
-      // pure-red danger state — totalTokens is the cumulative run cost, not
-      // a hard ceiling, so red would be overly alarmist.
-      const meterRatio = (Number(tab.max) > 0 ? (Number(tab.used) || 0) / Number(tab.max) : 0);
-      if (meterRatio >= 0.85) fill.classList.add("openclaw-tab-meter-fill--warning");
+      // No color escalation on the tab meter — totalTokens isn't a hard
+      // ceiling and the standalone context-notice banner is enough nudge
+      // when compaction is worth doing.
       fill.title = meterTitle;
       meter.title = meterTitle;
       meter.appendChild(fill);
@@ -3985,22 +3981,15 @@ function formatTokenCountShort(value) {
   return String(Math.round(safe));
 }
 
-// Tooltip mirrors the OpenClaw context-notice text: "{capped}% context used
-// {used}/{max} · {turns} turns". Cumulative totalTokens/contextTokens can
-// read >100% after compactions, so we surface the raw ratio in the tooltip
-// while the visible meter caps at 100% (parity with the control UI).
-function contextMeterTitle(model, used, max, pctRaw, sessionKey, sessionRow) {
+// Concise hover label: "{model} · {used} tokens · {N} turns"
+function contextMeterTitle(model, used, max, _pctRaw, sessionKey, _sessionRow) {
   const modelName = shortModelName(model || "unknown");
   const turns = getTabTurnCount(sessionKey);
-  const turnsPart = turns === null ? "" : `\n${turns} ${turns === 1 ? "turn" : "turns"}`;
   const safeUsed = Number(used) || 0;
-  const safeMax = Number(max) || 0;
-  if (safeMax <= 0 || safeUsed <= 0) return `${modelName}${turnsPart}`;
-  const ratio = safeUsed / safeMax;
-  const cappedPct = Math.min(100, Math.round(ratio * 100));
-  const rawPct = Math.round(ratio * 100);
-  const pctLabel = rawPct > cappedPct ? `${cappedPct}% (raw ${rawPct}%)` : `${cappedPct}%`;
-  return `${modelName}\n${pctLabel} context used\n${formatContextTokens(safeUsed)} / ${formatContextTokens(safeMax)}${turnsPart}`;
+  const parts = [modelName];
+  if (safeUsed > 0) parts.push(`${formatContextTokens(safeUsed)} tokens`);
+  if (turns !== null) parts.push(`${turns} ${turns === 1 ? "turn" : "turns"}`);
+  return parts.join(" · ");
 }
 
 function updateModelLabel() {
@@ -4106,16 +4095,15 @@ function computeContextNotice() {
   // context buffer. So we deliberately avoid OpenClaw control-ui's
   // misleading "100% context used" wording. Below the window we show "{pct}%
   // of window", above we show the multiplier ("10.3× window").
-  const sub1Pct = Math.round(ratio * 100);
   const multiplier = ratio.toFixed(1).replace(/\.0$/, "");
   const detail = ratio < 1
-    ? `${sub1Pct}% of window · ${formatContextTokens(used)} / ${formatContextTokens(max)}`
-    : `${multiplier}× window · compact to reduce future cost`;
+    ? `${Math.round(ratio * 100)}% of window`
+    : `${multiplier}× window`;
   return {
     used,
     max,
     ratio,
-    label: `${formatContextTokens(used)} tokens used this run`,
+    label: `${formatContextTokens(used)} tokens`,
     detail,
     compactRecommended: ratio >= CONTEXT_NOTICE_COMPACT_RATIO,
   };
