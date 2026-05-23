@@ -2848,10 +2848,17 @@ async function _renderTabsInner() {
     });
   }
 
+  // Don't double-render the Home-paired session: it's already represented
+  // as the Home tab, so excluding it here keeps "Home" and "Human chats"
+  // distinct rather than overlapping (e.g., a telegram session paired to
+  // Home shouldn't also appear as a separate telegram tab in the bar).
+  const homePairedSuffix = state.homeMirrorSessionKey || "";
   const others = convSessions
     .filter(s => {
       const sk = s.key.slice(prefix.length);
-      return sk !== "main";
+      if (sk === "main") return false;
+      if (homePairedSuffix && sk === homePairedSuffix) return false;
+      return true;
     });
 
   // Stable tab ordering:
