@@ -6162,6 +6162,10 @@ function appendInlineTypingBubble() {
   const ss = state.streams.get(activeKey);
   if (ss?.text) return;
 
+  // The "Working · …" pill already conveys in-progress; don't double up with
+  // a second dot-cluster floating above the messages.
+  if (ui.typingIndicator && !ui.typingIndicator.classList.contains("oc-hidden")) return;
+
   const bubble = document.createElement("div");
   bubble.className = "openclaw-msg openclaw-msg-assistant openclaw-inline-typing";
   bubble.id = "oc-inline-typing";
@@ -9068,7 +9072,9 @@ function updateStopSendIcon() {
   const btn = ui.sendBtn;
   if (!btn || !btn.classList.contains('stop-mode')) return;
   const hasComposerContent = ui.messageInput.value.trim().length > 0 || state.pendingAttachments.length > 0;
-  btn.classList.remove('oc-opacity-low');
+  // Stale mic/voice classes here cause handleSendOrQueue to route "Add to Queue"
+  // clicks to handleMicClick (mic-mode check runs before the queue check).
+  btn.classList.remove('oc-opacity-low', 'mic-mode', 'recording', 'transcribing');
   if (hasComposerContent) {
     btn.classList.add('queue-mode');
     btn.innerHTML = '<span class="oc-queue-label">Add to Queue</span>';
