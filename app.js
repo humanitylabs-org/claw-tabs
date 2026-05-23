@@ -6136,6 +6136,54 @@ function buildVoiceUrl(voicePath) {
   return `${httpUrl}/${source.replace(/^\/+/, "")}`;
 }
 
+// Match OpenClaw's live-chat-projector: these tokens are gateway control
+// signals, not user-facing text. Suppress whole messages whose only payload
+// is one of these, regardless of model.
+const SUPPRESSED_CONTROL_TOKEN_RE = /^\s*(?:NO_REPLY|ANNOUNCE_SKIP|REPLY_SKIP|HEARTBEAT_OK)\s*$/i;
+const GATEWAY_MEMORY_FLUSH_PREFIX = "Pre-compaction memory flush.";
+
+function extractMessageDisplayText(msg) {
+  if (!msg) return "";
+  if (typeof msg.text === "string") return msg.text;
+  if (typeof msg.content === "string") return msg.content;
+  if (Array.isArray(msg.content)) {
+    let merged = "";
+    for (const b of msg.content) {
+      if (b && b.type === "text" && typeof b.text === "string") merged += b.text;
+    }
+    return merged;
+  }
+  if (Array.isArray(msg.contentBlocks)) {
+    let merged = "";
+    for (const b of msg.contentBlocks) {
+      if (b && b.type === "text" && typeof b.text === "string") merged += b.text;
+    }
+    return merged;
+  }
+  return "";
+}
+
+function messageHasToolUseBlocks(msg) {
+  const blocks = Array.isArray(msg?.content) ? msg.content
+    : Array.isArray(msg?.contentBlocks) ? msg.contentBlocks
+    : null;
+  if (!blocks) return false;
+  return blocks.some((b) => b && (b.type === "tool_use" || b.type === "toolcall"));
+}
+
+function isSuppressedControlAssistantMessage(msg) {
+  if (msg?.role !== "assistant") return false;
+  if (messageHasToolUseBlocks(msg)) return false;
+  const text = extractMessageDisplayText(msg).trim();
+  return !!text && SUPPRESSED_CONTROL_TOKEN_RE.test(text);
+}
+
+function isGatewayMemoryFlushUserMessage(msg) {
+  if (msg?.role !== "user") return false;
+  const text = extractMessageDisplayText(msg).trim();
+  return text.startsWith(GATEWAY_MEMORY_FLUSH_PREFIX);
+}
+
 function isReasoningAssistantMessage(msg) {
   if (!msg || msg.role !== "assistant") return false;
   if (msg.isReasoning) return true;
@@ -6228,6 +6276,11 @@ function renderMessages(opts = {}) {
     if (msg.isWorkSummary && hideWorkSummaries) {
       continue;
     }
+
+    // TUI parity: hide gateway-injected control plumbing (pre-compaction memory
+    // flush prompts + NO_REPLY-style sentinels from the assistant).
+    if (isGatewayMemoryFlushUserMessage(msg)) continue;
+    if (isSuppressedControlAssistantMessage(msg)) continue;
 
     if (msg.role === "assistant" && isReasoningAssistantMessage(msg) && effectiveReasoningLevel() === "off") {
       continue;
