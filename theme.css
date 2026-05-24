@@ -5355,6 +5355,16 @@ body.oc-memory-flush-active .openclaw-input-area-inner {
   opacity: 0.85;
 }
 
+.openclaw-msg-local-pending {
+  opacity: 0.88;
+}
+
+.openclaw-msg-local-status {
+  margin-top: 4px;
+  font-size: 11px;
+  opacity: 0.72;
+}
+
 .openclaw-msg-text {
   line-height: var(--oc-leading-body);
 }

@@ -3463,6 +3463,7 @@ async function resetTab(tab) {
   if (!state.gateway?.connected) return;
   resetTabRenameState(tab.key, true);
   clearHistoryCache(tab.key);
+  clearLocalPendingMessages(tab.key);
   delete state.tabCache[tab.key];
   clearWorkSummaries(tab.key);
   const isHome = tab.key === "main";
@@ -3509,6 +3510,7 @@ async function closeTab(tab, currentKey) {
   clearCompactionStateForTab(tab.key);
   persistMessageQueue();
   clearHistoryCache(tab.key);
+  clearLocalPendingMessages(tab.key);
   delete state.tabCache[tab.key];
   clearWorkSummaries(tab.key);
   finishStream(tab.key);
@@ -5056,6 +5058,8 @@ function messagesEquivalent(a, b) {
       hasToolBlocks: !!m.hasToolBlocks,
       isReasoning: !!m.isReasoning,
       contentBlocks: Array.isArray(m.contentBlocks) ? m.contentBlocks : [],
+      localPending: !!m._localPending,
+      localStatus: str(m.localStatus),
     });
   };
 
@@ -5425,9 +5429,15 @@ function recordWorkSummary(sessionKey, runId, durationMs, outcome = "completed")
 // as PinchChat's IndexedDB cache, kept simpler with localStorage.
 const HISTORY_CACHE_KEY_PREFIX = "clawtabs.msgcache.v1.";
 const HISTORY_CACHE_MAX_MSGS = 200;
+const LOCAL_PENDING_KEY_PREFIX = "clawtabs.localPending.v1.";
+const LOCAL_PENDING_MAX_AGE_MS = 15 * 60 * 1000;
 
 function historyCacheStorageKey(sessionKey) {
   return HISTORY_CACHE_KEY_PREFIX + sessionKey;
+}
+
+function localPendingStorageKey(sessionKey) {
+  return LOCAL_PENDING_KEY_PREFIX + sessionKey;
 }
 
 function loadHistoryCache(sessionKey) {
@@ -5442,13 +5452,98 @@ function loadHistoryCache(sessionKey) {
 function saveHistoryCache(sessionKey, messages) {
   try {
     if (!Array.isArray(messages) || messages.length === 0) return;
-    const capped = messages.slice(-HISTORY_CACHE_MAX_MSGS);
+    const capped = messages.filter((m) => !m?._localPending).slice(-HISTORY_CACHE_MAX_MSGS);
     localStorage.setItem(historyCacheStorageKey(sessionKey), JSON.stringify(capped));
   } catch { /* quota or serialization issues — fail silent */ }
 }
 
 function clearHistoryCache(sessionKey) {
   try { localStorage.removeItem(historyCacheStorageKey(sessionKey)); } catch {}
+}
+
+function loadLocalPendingMessages(sessionKey) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(localPendingStorageKey(sessionKey)) || "[]");
+    if (!Array.isArray(parsed)) return [];
+    const now = Date.now();
+    return parsed.filter((m) => {
+      const ts = Number(m?.timestamp || m?.localCreatedAt || 0);
+      return m?.role === "user" && ts > 0 && now - ts < LOCAL_PENDING_MAX_AGE_MS;
+    });
+  } catch { return []; }
+}
+
+function saveLocalPendingMessages(sessionKey, messages) {
+  try {
+    const list = Array.isArray(messages) ? messages : [];
+    if (list.length === 0) {
+      localStorage.removeItem(localPendingStorageKey(sessionKey));
+      return;
+    }
+    localStorage.setItem(localPendingStorageKey(sessionKey), JSON.stringify(list.slice(-20)));
+  } catch {}
+}
+
+function clearLocalPendingMessages(sessionKey) {
+  try { localStorage.removeItem(localPendingStorageKey(sessionKey)); } catch {}
+}
+
+function upsertLocalPendingMessage(sessionKey, message) {
+  if (!sessionKey || !message?.clientId) return;
+  const list = loadLocalPendingMessages(sessionKey);
+  const idx = list.findIndex((m) => m?.clientId === message.clientId);
+  if (idx >= 0) list[idx] = { ...list[idx], ...message };
+  else list.push(message);
+  saveLocalPendingMessages(sessionKey, list);
+}
+
+function updateLocalPendingMessage(sessionKey, clientId, patch) {
+  if (!sessionKey || !clientId) return;
+  const list = loadLocalPendingMessages(sessionKey);
+  const idx = list.findIndex((m) => m?.clientId === clientId);
+  if (idx < 0) return;
+  list[idx] = { ...list[idx], ...patch };
+  saveLocalPendingMessages(sessionKey, list);
+
+  const updateList = (messages) => {
+    if (!Array.isArray(messages)) return false;
+    const msg = messages.find((m) => m?._localPending && m?.clientId === clientId);
+    if (!msg) return false;
+    Object.assign(msg, patch);
+    return true;
+  };
+  if (sessionKey === state.sessionKey && updateList(state.messages)) {
+    renderMessages();
+  } else if (state.tabCache?.[sessionKey]?.messages) {
+    updateList(state.tabCache[sessionKey].messages);
+  }
+}
+
+function sameLocalPendingText(a, b) {
+  const text = str(a?.text).trim();
+  return text && text === str(b?.text).trim()
+    && str(a?.role) === "user"
+    && str(b?.role) === "user";
+}
+
+function mergeLocalPendingMessages(sessionKey, canonicalMessages) {
+  const canonical = Array.isArray(canonicalMessages) ? canonicalMessages : [];
+  const pending = loadLocalPendingMessages(sessionKey);
+  if (pending.length === 0) return canonical;
+
+  const unresolved = pending.filter((p) => !canonical.some((m) => sameLocalPendingText(p, m)));
+  saveLocalPendingMessages(sessionKey, unresolved);
+  if (unresolved.length === 0) return canonical;
+
+  const merged = [...canonical];
+  for (const p of unresolved) {
+    const local = { ...p, _localPending: true };
+    const ts = Number(local.timestamp || 0);
+    let idx = merged.findIndex((m) => Number(m?.timestamp || 0) > ts);
+    if (idx < 0) idx = merged.length;
+    merged.splice(idx, 0, local);
+  }
+  return merged;
 }
 
 function historyCacheIdentity(m) {
@@ -5802,7 +5897,7 @@ async function loadChatHistory(opts) {
     // Merge polled history with our local persistent cache so older messages
     // dropped by gateway compaction stay visible (as archived/grayed).
     const cachedHistory = loadHistoryCache(targetKey);
-    const merged = mergeHistoryWithCache(parsed, cachedHistory);
+    const merged = mergeLocalPendingMessages(targetKey, mergeHistoryWithCache(parsed, cachedHistory));
 
     // Clobber guard now compares the MERGED result against what's currently
     // rendered. With the cache merge, normal polls during compaction won't
@@ -6827,6 +6922,7 @@ function appendMessage(msg, opts = {}) {
   bubble.className = `openclaw-msg ${cls}`;
   if (msg.isWorkSummary) bubble.classList.add("openclaw-msg-work-summary");
   if (msg._isArchived) bubble.classList.add("openclaw-msg-archived");
+  if (msg._localPending) bubble.classList.add("openclaw-msg-local-pending");
 
   let atPathStripMatches = null;
   if (msg.role === "user" && (!msg.images || msg.images.length === 0)) {
@@ -6907,6 +7003,17 @@ function appendMessage(msg, opts = {}) {
 
   if (!suppressAudio) {
     for (const ap of allAudio) renderAudioPlayer(bubble, ap);
+  }
+
+  if (msg._localPending && msg.localStatus && msg.localStatus !== "sent") {
+    const status = document.createElement("div");
+    status.className = "openclaw-msg-local-status";
+    status.textContent = msg.localStatus === "not-confirmed"
+      ? "not confirmed"
+      : msg.localStatus === "failed"
+        ? "send failed"
+        : "sending...";
+    bubble.appendChild(status);
   }
 
   const omittedImages = Math.max(0, Number(msg.omittedImages) || 0);
@@ -8717,17 +8824,24 @@ async function sendMessage(text, opts = {}) {
     }
   }
 
+  const runId = generateId();
   const userTimestamp = Date.now();
   const userTextForCache = displayText || fullMessage;
 
   if (!hideUserBubble && isActiveTarget) {
-    state.messages.push({
+    const localPendingMessage = {
+      clientId: runId,
       role: "user",
       text: userTextForCache,
       images: userImages,
       audios: userAudios,
       timestamp: userTimestamp,
-    });
+      localCreatedAt: userTimestamp,
+      localStatus: "sending",
+      _localPending: true,
+    };
+    upsertLocalPendingMessage(targetSessionKey, localPendingMessage);
+    state.messages.push(localPendingMessage);
     if (userImages.length > 0 || userAudios.length > 0) {
       rememberPendingInlineMedia(targetSessionKey, userTextForCache, userTimestamp, userImages, userAudios);
     }
@@ -8739,7 +8853,6 @@ async function sendMessage(text, opts = {}) {
     void autoRenameTab(targetSessionKey, displayText || fullMessage);
   }
 
-  const runId = generateId();
   const sendSessionKey = targetSessionKey;
   const startedAtMs = Date.now();
 
@@ -8792,18 +8905,29 @@ async function sendMessage(text, opts = {}) {
     if (gatewayAttachments.length > 0) sendParams.attachments = gatewayAttachments;
     await state.gateway.request("chat.send", sendParams);
     sentOk = true;
+    updateLocalPendingMessage(sendSessionKey, runId, { localStatus: "sent" });
   } catch (err) {
     sendError = err;
-    if (ss.compactTimer) clearTimeout(ss.compactTimer);
-    if (isActiveTarget) {
-      state.messages.push({ role: "assistant", text: `Error: ${err}`, images: [], timestamp: Date.now() });
-    }
-    state.streams.delete(sendSessionKey);
-    state.runToSession.delete(runId);
-    if (state.streamAssembler) state.streamAssembler.drop(runId);
-    if (isActiveTarget) {
-      setSendButtonStopMode(false);
-      renderMessages();
+    const timeout = /request timeout/i.test(String(err?.message || err));
+    updateLocalPendingMessage(sendSessionKey, runId, {
+      localStatus: timeout ? "not-confirmed" : "failed",
+    });
+    if (timeout) {
+      sentOk = true;
+      sendError = null;
+      if (isActiveTarget) loadChatHistory({ background: true, forceBottom: true });
+    } else {
+      if (ss.compactTimer) clearTimeout(ss.compactTimer);
+      if (isActiveTarget) {
+        state.messages.push({ role: "assistant", text: `Error: ${err}`, images: [], timestamp: Date.now() });
+      }
+      state.streams.delete(sendSessionKey);
+      state.runToSession.delete(runId);
+      if (state.streamAssembler) state.streamAssembler.drop(runId);
+      if (isActiveTarget) {
+        setSendButtonStopMode(false);
+        renderMessages();
+      }
     }
   } finally {
     state.sending = false;
@@ -10848,12 +10972,12 @@ const DEFAULT_OPTIONS = {
   verbose: ["not set", "off", "on", "full"],
 };
 
-// Recommended AI Model defaults — GPT-5.5 primary, no fallbacks
+// Recommended AI Model defaults — GPT-5.5 primary, no fallbacks, quiet steps
 // (per 2026-05-24 stabilization decision in agent memory).
 const RECOMMENDED_MODEL_DEFAULTS = {
   model: "openai-codex/gpt-5.5",
   fallbacks: [],
-  verbose: "on",
+  verbose: "off",
 };
 
 function defaultOptionLabel(key, opt) {
@@ -10998,7 +11122,7 @@ function updateDefaultsPanel() {
     '</div>';
   }
 
-  // Recommended model state: GPT-5.5 primary, no fallbacks, show steps = on
+  // Recommended model state: GPT-5.5 primary, no fallbacks, show steps = off
   const recModelOk = String(d.model || "") === RECOMMENDED_MODEL_DEFAULTS.model
     && normalizeFallbacks(d.fallbacks || [], d.model).length === RECOMMENDED_MODEL_DEFAULTS.fallbacks.length
     && String(d.verbose || "").toLowerCase() === RECOMMENDED_MODEL_DEFAULTS.verbose;
@@ -11694,7 +11818,6 @@ async function applyRecommendedModelDefaults() {
     updateDefaultsPanel();
     updateReliabilityPanel();
     updateBarControls();
-    showBanner("Recommended model defaults applied");
   } catch (err) {
     state.gatewayRestarting = false;
     console.warn("Failed to apply recommended model defaults:", err);
