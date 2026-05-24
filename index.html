@@ -15,7 +15,6 @@
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
   <meta name="oc-base-path" content="/clawtabs">
   <link rel="manifest" href="/clawtabs/manifest.json">
-  <link rel="icon" type="image/svg+xml" href="/clawtabs/favicon.svg">
   <link rel="icon" type="image/png" sizes="32x32" href="/clawtabs/favicon-32.png">
   <link rel="icon" type="image/png" sizes="192x192" href="/clawtabs/icon-192.png">
   <link rel="apple-touch-icon" href="/clawtabs/apple-touch-icon.png">
@@ -286,12 +285,6 @@
       color: var(--text-normal);
       border-color: color-mix(in srgb, var(--text-faint) 35%, transparent);
       background: var(--background-primary);
-    }
-
-    /* Reset button on non-home tabs (shows alongside ×) */
-    .openclaw-tab-reset {
-      order: 2;
-      margin-right: 0;
     }
 
     /* Home tab: pinned inbox tab (mirrors Telegram when available) */
@@ -1543,7 +1536,7 @@
     [data-theme="light"] .openclaw-input-wrapper { background: var(--background-secondary); border-color: var(--background-modifier-border); }
     [data-theme="light"] #message-input { color: var(--text-normal); }
   </style>
-  <link rel="stylesheet" href="/clawtabs/theme.css?v=19">
+  <link rel="stylesheet" href="/clawtabs/theme.css?v=20">
   <!-- Cal redesign: final spacing fix (inline = highest cascade priority) -->
   <style id="cal-spacing-fix">
     /* Every section toggle — tight spacing, no exceptions */
@@ -2139,7 +2132,7 @@
 
   </div>
 
-  <script src="/clawtabs/app.js?v=66"></script>
+  <script src="/clawtabs/app.js?v=67"></script>
   <!-- Connect Modal (styles inlined to avoid cache issues) -->
   <style>
     #connect-modal-overlay{display:none;position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.7);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);justify-content:center;align-items:center;padding:24px}

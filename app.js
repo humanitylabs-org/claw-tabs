@@ -968,6 +968,8 @@ const state = {
   workingSince: {}, // { [sessionKey]: epochMs }
   workingTicker: null,
   streamEl: null,
+  streamTextEl: null,
+  streamRenderFrame: 0,
   streamAssembler: null,
   gapRecoveryInFlight: false,
 
@@ -2499,16 +2501,6 @@ function renderMobileTabSwitcher() {
   actions.innerHTML = "";
   const isHome = current.key === "main";
 
-  const resetBtn = document.createElement("button");
-  resetBtn.className = "oc-tab-switcher-action";
-  resetBtn.title = "Reset conversation";
-  resetBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 105.64-12.28L1 10"/></svg>';
-  resetBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    resetTab(current);
-  });
-  actions.appendChild(resetBtn);
-
   const closeBtn = document.createElement("button");
   closeBtn.className = "oc-tab-switcher-action";
   closeBtn.textContent = "×";
@@ -2662,17 +2654,6 @@ function renderHamburgerDropdown() {
     const actions = document.createElement("span");
     actions.className = "oc-dd-actions";
 
-    const resetBtn = document.createElement("span");
-    resetBtn.className = "oc-dd-action-btn";
-    resetBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 105.64-12.28L1 10"/></svg>';
-    resetBtn.title = "Reset conversation";
-    resetBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      dd.classList.remove("oc-open");
-      resetTab(tab);
-    });
-    actions.appendChild(resetBtn);
-
     if (!isHome) {
       const closeBtn = document.createElement("span");
       closeBtn.className = "oc-dd-action-btn oc-dd-action-close";
@@ -2684,12 +2665,6 @@ function renderHamburgerDropdown() {
         closeTab(tab, currentKey);
       });
       actions.appendChild(closeBtn);
-    } else {
-      const spacer = document.createElement("span");
-      spacer.className = "oc-dd-action-btn";
-      spacer.style.visibility = "hidden";
-      spacer.textContent = "×";
-      actions.appendChild(spacer);
     }
     item.appendChild(actions);
 
@@ -2992,16 +2967,7 @@ async function _renderTabsInner() {
     const actionBtn = document.createElement("span");
     actionBtn.className = "openclaw-tab-close";
 
-    if (isHome) {
-      // Command-center home node stays clean/icon-only; reset remains available in chat commands.
-    } else {
-      const resetBtn = document.createElement("span");
-      resetBtn.className = "openclaw-tab-close openclaw-tab-reset";
-      resetBtn.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 105.64-12.28L1 10"/></svg>';
-      resetBtn.title = "Reset conversation";
-      resetBtn.addEventListener("click", (e) => { e.stopPropagation(); resetTab(tab); });
-      row.appendChild(resetBtn);
-
+    if (!isHome) {
       actionBtn.textContent = "×";
       actionBtn.title = "Close tab";
       actionBtn.addEventListener("click", (e) => { e.stopPropagation(); closeTab(tab, currentKey); });
@@ -6475,29 +6441,15 @@ function hasActiveRunInSession(sessionKey = state.sessionKey) {
 
 function appendInlineTypingBubble() {
   const activeKey = state.sessionKey;
+  document.getElementById("oc-inline-typing")?.remove();
   if (!hasActiveRunInSession(activeKey)) return;
-
   const ss = state.streams.get(activeKey);
   if (ss?.text) return;
 
-  // The "Working · …" pill already conveys in-progress; don't double up with
-  // a second dot-cluster floating above the messages.
-  if (ui.typingIndicator && !ui.typingIndicator.classList.contains("oc-hidden")) return;
-
-  const bubble = document.createElement("div");
-  bubble.className = "openclaw-msg openclaw-msg-assistant openclaw-inline-typing";
-  bubble.id = "oc-inline-typing";
-
-  const row = document.createElement("div");
-  row.className = "openclaw-inline-typing-row";
-  for (let i = 0; i < 3; i++) {
-    const dot = document.createElement("span");
-    dot.className = "openclaw-dot";
-    row.appendChild(dot);
-  }
-
-  bubble.appendChild(row);
-  ui.messagesContainer.appendChild(bubble);
+  // Keep progress in one place. The bottom working pill is stable across
+  // renders; an in-thread dot bubble reads like duplicate assistant output.
+  renderTypingLabel(STATUS_WORKING, activeKey);
+  ui.typingIndicator.classList.remove("oc-hidden");
 }
 
 function renderMessages(opts = {}) {
@@ -10896,10 +10848,10 @@ const DEFAULT_OPTIONS = {
   verbose: ["not set", "off", "on", "full"],
 };
 
-// Recommended AI Model defaults — Opus 4.7 primary, no fallbacks
-// (per 2026-05-21 stabilization decision in agent memory).
+// Recommended AI Model defaults — GPT-5.5 primary, no fallbacks
+// (per 2026-05-24 stabilization decision in agent memory).
 const RECOMMENDED_MODEL_DEFAULTS = {
-  model: "anthropic/claude-opus-4-7",
+  model: "openai-codex/gpt-5.5",
   fallbacks: [],
   verbose: "on",
 };
@@ -11046,7 +10998,7 @@ function updateDefaultsPanel() {
     '</div>';
   }
 
-  // Recommended baseline: Opus 4.7 primary, no fallbacks, show steps = on
+  // Recommended model state: GPT-5.5 primary, no fallbacks, show steps = on
   const recModelOk = String(d.model || "") === RECOMMENDED_MODEL_DEFAULTS.model
     && normalizeFallbacks(d.fallbacks || [], d.model).length === RECOMMENDED_MODEL_DEFAULTS.fallbacks.length
     && String(d.verbose || "").toLowerCase() === RECOMMENDED_MODEL_DEFAULTS.verbose;

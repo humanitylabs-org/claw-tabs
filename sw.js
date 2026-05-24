@@ -15,7 +15,7 @@
 //   - bump SHELL_CACHE_VERSION whenever the shell changes shape; old caches
 //     are pruned on activate.
 
-const SHELL_CACHE_VERSION = "clawtabs-shell-v1";
+const SHELL_CACHE_VERSION = "clawtabs-shell-v2";
 const APP_BASE = (() => {
   // Service worker scope is /clawtabs/ — strip the trailing slash for join.
   try { return new URL(self.registration.scope).pathname.replace(/\/+$/, ""); }
@@ -28,7 +28,6 @@ const SHELL_ASSETS = [
   `${APP_BASE}/app.js`,
   `${APP_BASE}/theme.css`,
   `${APP_BASE}/manifest.json`,
-  `${APP_BASE}/favicon.svg`,
   `${APP_BASE}/favicon-32.png`,
   `${APP_BASE}/icon-192.png`,
   `${APP_BASE}/icon-512.png`,
