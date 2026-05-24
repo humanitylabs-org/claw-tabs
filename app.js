@@ -3972,7 +3972,7 @@ function updateModelLabel() {
   updateDashboard();
 }
 
-// ─── Bar Controls (thinking effort + steps visibility) ──────────────
+// ─── Bar Controls (thinking effort) ─────────────────────────────────
 
 const THINKING_CYCLE = ["off", "low", "medium", "high", "xhigh"];
 const STATUS_WORKING = "Working";
@@ -4012,20 +4012,13 @@ function formatThinkingLevel(level) {
 
 function updateBarControls() {
   const thinkingEl = document.getElementById("bar-thinking");
-  const stepsEl = document.getElementById("bar-verbose");
   const homePairEl = document.getElementById("bar-home-pair");
   const homePairSep = document.getElementById("bar-home-pair-sep");
   const thinkingMode = effectiveThinkingLevel();
-  const mode = effectiveVerboseLevel();
 
   if (thinkingEl) {
     thinkingEl.textContent = "thinking effort: " + formatThinkingLevel(thinkingMode);
     thinkingEl.classList.toggle("active", thinkingMode !== "off");
-  }
-
-  if (stepsEl) {
-    stepsEl.textContent = "show steps: " + mode;
-    stepsEl.classList.toggle("active", mode !== "off");
   }
 
   // Home pairing chip moved to the Tab Settings panel — keep hidden in the bottom bar.
@@ -4480,7 +4473,10 @@ async function loadDynamicCommandMenuItems() {
         insert,
         acceptsArgs: !!cmd?.acceptsArgs,
       };
-    }).filter((item) => item.insert && item.insert !== "/");
+    }).filter((item) => {
+      if (!item.insert || item.insert === "/") return false;
+      return item.insert.split(/\s+/)[0].toLowerCase() !== "/verbose";
+    });
 
     const dedup = [];
     const seen = new Set();
@@ -4508,15 +4504,6 @@ async function runMenuCommand(commandText) {
 }
 
 const COMMAND_BEHAVIORS = {
-  "/verbose": {
-    type: "choices",
-    title: "verbose",
-    choices: [
-      { label: "on", command: "/verbose on", description: "Show tool use" },
-      { label: "full", command: "/verbose full", description: "Show tool use + output" },
-      { label: "off", command: "/verbose off", description: "Hide tool details" },
-    ]
-  },
   "/reasoning": {
     type: "choices",
     title: "reasoning",
@@ -4658,15 +4645,6 @@ async function setSessionControl(field, nextValue) {
   }
 }
 
-async function cycleShowSteps() {
-  // Binary toggle: clicking the chip should land on "on" or "off" and never
-  // sneak the user into "full" (tool output is noisy). "full" stays reachable
-  // via /verbose full for the rare case someone wants it.
-  const current = effectiveVerboseLevel();
-  const next = current === "on" ? "off" : "on";
-  await setSessionControl("verboseLevel", next);
-}
-
 async function cycleThinkingEffort() {
   const current = effectiveThinkingLevel();
   const idx = THINKING_CYCLE.indexOf(current);
@@ -4676,9 +4654,6 @@ async function cycleThinkingEffort() {
 
 document.getElementById("bar-thinking")?.addEventListener("click", () =>
   cycleThinkingEffort());
-
-document.getElementById("bar-verbose")?.addEventListener("click", () =>
-  cycleShowSteps());
 
 document.getElementById("bar-download")?.addEventListener("click", () =>
   exportCurrentSession());
