@@ -1,6 +1,6 @@
 # Claw Tabs
 
-Local-first OpenClaw web client, hosted by you at:
+Local-first agent chat/tab web client, hosted by you at:
 
 `https://<your-device>.ts.net/clawtabs`
 
@@ -13,7 +13,7 @@ This repo is intentionally separate from `usemyclaw.com` / `openclaw-chat` so pu
 - PWA scope isolated to `/clawtabs/`
 - No dependency on a public hosted frontend
 - Direct-to-tabs startup (no landing/connect wall)
-- Same-host bootstrap: server reads local OpenClaw config and auto-connects the UI
+- Same-host bootstrap: server can read a compatible agent gateway token from env/config and auto-connect the UI
 
 ## Quick start
 
@@ -64,6 +64,9 @@ Optional environment variables:
 - `CLAWTABS_PORT` (default: `8788`)
 - `CLAWTABS_HOST` (default: `127.0.0.1`)
 - `CLAWTABS_BASE_PATH` (default: `/clawtabs`)
+- `CLAWTABS_GATEWAY_URL` or `AGENT_GATEWAY_URL` for a compatible agent gateway URL
+- `CLAWTABS_GATEWAY_TOKEN` or `AGENT_GATEWAY_TOKEN` to provide the gateway token directly
+- `CLAWTABS_GATEWAY_CONFIG` for a JSON config file containing `gateway.auth.token` (legacy `CLAWTABS_OPENCLAW_CONFIG` still works)
 
 Example:
 
@@ -81,11 +84,12 @@ export CLAWTABS_BASE_PATH=/clawtabs
 
 ## Gateway notes
 
-- If Claw Tabs and your OpenClaw gateway are on different tailnet hostnames, add the Claw Tabs origin to `gateway.controlUi.allowedOrigins`.
-- Keep `gateway.tailscale.mode=serve` enabled.
+- Claw Tabs expects a compatible WebSocket gateway. Set `CLAWTABS_GATEWAY_URL`/`CLAWTABS_GATEWAY_TOKEN` when the installer is not using the default local config path.
+- If Claw Tabs and your agent gateway are on different tailnet hostnames, add the Claw Tabs origin to that gateway's allowed origins.
+- For OpenClaw, keep `gateway.tailscale.mode=serve` enabled.
 
 ## Tech
 
 - Pure HTML/CSS/JS frontend
-- Ed25519 device auth + OpenClaw WebSocket protocol
+- Ed25519 device auth + compatible agent WebSocket protocol
 - Local credentials in browser storage

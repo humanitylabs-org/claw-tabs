@@ -10,8 +10,10 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(SCRIPT_DIR, "..");
 const PORT = Number(process.env.CLAWTABS_PORT || 8788);
 const HOST = process.env.CLAWTABS_HOST || "127.0.0.1";
-const OPENCLAW_CONFIG_PATH = process.env.CLAWTABS_OPENCLAW_CONFIG || "/root/.openclaw/openclaw.json";
-const GATEWAY_URL_OVERRIDE = (process.env.CLAWTABS_GATEWAY_URL || "").trim();
+const DEFAULT_OPENCLAW_CONFIG_PATH = path.join(process.env.HOME || "/root", ".openclaw", "openclaw.json");
+const GATEWAY_CONFIG_PATH = process.env.CLAWTABS_GATEWAY_CONFIG || process.env.CLAWTABS_OPENCLAW_CONFIG || DEFAULT_OPENCLAW_CONFIG_PATH;
+const GATEWAY_TOKEN_OVERRIDE = (process.env.CLAWTABS_GATEWAY_TOKEN || process.env.AGENT_GATEWAY_TOKEN || "").trim();
+const GATEWAY_URL_OVERRIDE = (process.env.CLAWTABS_GATEWAY_URL || process.env.AGENT_GATEWAY_URL || "").trim();
 const PANELS_STATUS_SCRIPT = path.join(ROOT_DIR, "scripts", "panels-status.sh");
 const execFileAsync = promisify(execFile);
 
@@ -78,8 +80,14 @@ async function loadGatewayToken() {
     return cachedBootstrap.value;
   }
 
+  if (GATEWAY_TOKEN_OVERRIDE) {
+    const value = { token: GATEWAY_TOKEN_OVERRIDE };
+    cachedBootstrap = { at: now, value };
+    return value;
+  }
+
   try {
-    const raw = await fs.readFile(OPENCLAW_CONFIG_PATH, "utf8");
+    const raw = await fs.readFile(GATEWAY_CONFIG_PATH, "utf8");
     const parsed = JSON.parse(raw);
     const token = String(parsed?.gateway?.auth?.token || "").trim();
     if (!token) {
